@@ -39,6 +39,18 @@ export function parseHeartbeatSeconds(value: string | null | undefined): number 
   return seconds;
 }
 
+/**
+ * The floor between two `tool_execution_update` snapshots of one session
+ * subscription. omp sends the accumulated tool output on every update, so a
+ * bash run printing megabytes would otherwise forward the whole buffer many
+ * times per second. The frame is a self-contained snapshot: holding the newest
+ * one is lossless, and a boundary frame (`tool_execution_end`, `message_end`,
+ * …) always flushes it first, so the final output is never delayed. Message
+ * deltas are not throttled: they are incremental since the delta protocol.
+ */
+export const TOOL_UPDATE_FRAME_MIN_INTERVAL_MS = 1_000;
+/** Retry step while the socket is backpressured: keep the latest snapshot, never buffer. */
+const TOOL_UPDATE_RETRY_MS = 50;
 const encoder = new TextEncoder();
 
 export type SubscribeResult =
@@ -53,8 +65,27 @@ class Subscription {
   // Session backpressure queue: message updates merge and consecutive outbox
   // snapshots replace each other. Other frames flush it first to preserve order.
   pendingUpdates: QueuedUpdate[] = [];
+  // At most one `tool_execution_update` snapshot is held between writes: the
+  // newest snapshot supersedes every older one (each frame carries the whole
+  // accumulated output), and any other frame flushes it first.
+  heldToolUpdate: { data: Record<string, unknown>; at: number } | null = null;
+  /** When the last tool snapshot was written (0 = never). */
+  lastToolUpdateAt = 0;
+  /** The one timer that releases a held tool snapshot once its window elapsed. */
+  toolFlushTimer: NodeJS.Timeout | undefined = undefined;
+  /** Deadline of `toolFlushTimer`; a newer frame may pull it forward. */
+  toolFlushAt = 0;
 
-  constructor(readonly id: string, readonly coalescesMessageUpdates: boolean) {}
+  constructor(readonly id: string, readonly throttlesAgentUpdates: boolean) {}
+
+  /** Drop held frames and their timer (unsubscribe, end, close). */
+  clearUpdates(): void {
+    this.pendingUpdates = [];
+    this.heldToolUpdate = null;
+    clearTimeout(this.toolFlushTimer);
+    this.toolFlushTimer = undefined;
+    this.toolFlushAt = 0;
+  }
 }
 
 /** What a channel opener may do with its subscription. */
@@ -200,6 +231,10 @@ export class EventStreamConnection {
     return this.closed;
   }
 
+  get heartbeatMs(): number {
+    return this.sink.heartbeatMs;
+  }
+
   get subscriptionCount(): number {
     return this.subscriptions.size;
   }
@@ -241,7 +276,7 @@ export class EventStreamConnection {
 
   private release(subscription: Subscription): void {
     subscription.active = false;
-    subscription.pendingUpdates = [];
+    subscription.clearUpdates();
     const detach = subscription.detach;
     subscription.detach = null;
     runDetach(detach);
@@ -299,14 +334,84 @@ export class EventStreamConnection {
   }
 
   private flushAll(): boolean {
-    for (const subscription of this.subscriptions.values()) this.flush(subscription);
+    for (const subscription of this.subscriptions.values()) {
+      if (!this.flushToolUpdate(subscription, true)) return false;
+      this.flush(subscription);
+    }
     return !this.closed;
+  }
+
+  /** Write the held tool snapshot when its window elapsed (or `force`), false means the stream is gone. */
+  private flushToolUpdate(subscription: Subscription, force = false): boolean {
+    const held = subscription.heldToolUpdate;
+    if (!held) return !this.closed;
+    const now = Date.now();
+    if (!force && now < subscription.lastToolUpdateAt + TOOL_UPDATE_FRAME_MIN_INTERVAL_MS) return !this.closed;
+    // Queued message deltas were emitted before the held snapshot (a tool
+    // update never queues behind them), so they must go out first.
+    if (!this.flush(subscription)) return false;
+    subscription.heldToolUpdate = null;
+    if (subscription.toolFlushTimer !== undefined) {
+      clearTimeout(subscription.toolFlushTimer);
+      subscription.toolFlushTimer = undefined;
+      subscription.toolFlushAt = 0;
+    }
+    subscription.lastToolUpdateAt = now;
+    return this.writeFrame(subscription, held.data, held.at);
+  }
+
+  /**
+   * Arm the timer that releases a held tool snapshot. A newer frame only pulls
+   * the deadline forward, never pushes it back; while the socket is behind it
+   * retries shortly and keeps the latest snapshot instead of buffering frames.
+   */
+  private scheduleToolFlush(subscription: Subscription, delayMs: number): void {
+    if (!subscription.active || this.closed) return;
+    const deadline = Date.now() + Math.max(0, delayMs);
+    if (subscription.toolFlushTimer !== undefined && subscription.toolFlushAt <= deadline) return;
+    clearTimeout(subscription.toolFlushTimer);
+    subscription.toolFlushAt = deadline;
+    subscription.toolFlushTimer = setTimeout(() => {
+      subscription.toolFlushTimer = undefined;
+      subscription.toolFlushAt = 0;
+      if (!subscription.active || this.closed) return;
+      if (this.sink.backpressured()) {
+        this.scheduleToolFlush(subscription, TOOL_UPDATE_RETRY_MS);
+        return;
+      }
+      if (!this.flushToolUpdate(subscription)) return;
+      if (subscription.heldToolUpdate) {
+        const remaining = subscription.lastToolUpdateAt + TOOL_UPDATE_FRAME_MIN_INTERVAL_MS - Date.now();
+        this.scheduleToolFlush(subscription, Math.max(remaining, TOOL_UPDATE_RETRY_MS));
+      }
+    }, Math.max(0, delayMs));
+    // A throttle window must not keep the process alive.
+    subscription.toolFlushTimer.unref?.();
+  }
+
+  /** Hold the newest tool snapshot, writing it at once when its window is open. */
+  private deliverToolUpdate(subscription: Subscription, data: Record<string, unknown>): void {
+    const now = Date.now();
+    subscription.heldToolUpdate = { data, at: now };
+    const delay = subscription.lastToolUpdateAt + TOOL_UPDATE_FRAME_MIN_INTERVAL_MS - now;
+    if (delay <= 0 && !this.sink.backpressured()) {
+      this.flushToolUpdate(subscription, true);
+      return;
+    }
+    this.scheduleToolFlush(subscription, Math.max(delay, TOOL_UPDATE_RETRY_MS));
   }
 
   private deliver(subscription: Subscription, data: unknown): void {
     if (!subscription.active || this.closed) return;
+    if (subscription.throttlesAgentUpdates && isRecord(data) && data.type === "tool_execution_update") {
+      this.deliverToolUpdate(subscription, data);
+      return;
+    }
+    // Every other frame is a boundary (`message_end`, `tool_execution_end`, …):
+    // the held tool snapshot must reach the client before it, never after.
+    if (!this.flushToolUpdate(subscription, true)) return;
     if (
-      subscription.coalescesMessageUpdates
+      subscription.throttlesAgentUpdates
       && isRecord(data)
       && (data.type === "outbox_update" || (data.type === "message_update" && this.sink.backpressured()))
     ) {
@@ -411,7 +516,9 @@ function openRunningChannel(handle: SubscriptionHandle): SubscribeResult {
 // as reachable for toasts and in-page system notifications while this is open.
 function openNotificationsChannel(clientId: string, handle: SubscriptionHandle): SubscribeResult {
   handle.open();
-  handle.setDetach(attachNotificationClient(clientId, (message) => handle.send({ type: "notification", ...message })));
+  handle.setDetach(attachNotificationClient(clientId, (message) => {
+    handle.send({ type: "notification", kind: message.kind, event: message.event });
+  }));
   return SUBSCRIBED;
 }
 
