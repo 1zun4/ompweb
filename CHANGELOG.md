@@ -6,9 +6,14 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **Usage includes linked hosts.** Settings → Usage now counts the tokens and cost of sessions on every linked host, not only this machine. Each host's daemon reads its own transcripts; the web server keeps a copy, so a host that goes offline keeps its last numbers. A new **Host** breakdown shows each machine's share and when an offline host last synced, and project rows name their host. A host that is still syncing fills in on its own. Refresh reads every host's sessions again, with the prices in that host's `models.yml`. A host on an older ompweb is listed as needing an update.
+
 ### Fixed
 
 - **Restore HTTP LAN and VPN access.** Browser UUID generation now works without secure-context-only `crypto.randomUUID()`, preventing the "Something went wrong" crash when opening the app or creating a session.
+- **Refreshing Usage applies changed prices, and says when it fails.** Prices edited in `models.yml` now apply to existing sessions when you refresh Settings → Usage. They used to keep the old prices until the web server restarted. A refresh that fails now shows the error above the last report instead of leaving it up without a word.
 
 ## [v0.7.1] - 2026-11-14
 
