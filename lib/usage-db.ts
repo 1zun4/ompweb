@@ -643,7 +643,7 @@ export async function getUsageReportFromDb(
             timestamp: cur.getTime(),
             totalCost: 0,
             totalTokens: 0,
-            byProvider: {},
+            byProvider: Object.create(null),
           });
         }
         cur.setMonth(cur.getMonth() + 1);
@@ -661,7 +661,7 @@ export async function getUsageReportFromDb(
             timestamp: cur.getTime(),
             totalCost: 0,
             totalTokens: 0,
-            byProvider: {},
+            byProvider: Object.create(null),
           });
         }
         cur.setDate(cur.getDate() + 1);
@@ -679,7 +679,7 @@ export async function getUsageReportFromDb(
         timestamp: row.minTimestamp,
         totalCost: 0,
         totalTokens: 0,
-        byProvider: {},
+        byProvider: Object.create(null),
       };
       timeSeriesMap.set(key, bucket);
     }

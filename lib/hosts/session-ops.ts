@@ -32,7 +32,7 @@ import {
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "../omp/session-files";
-import { readModelsConfig, type ModelsFileConfig } from "../omp/models-config";
+import { readModelsConfig } from "../omp/models-config";
 import { getSessionsDir } from "../omp/paths";
 import { preparePoolProject, type PreparedPoolProject } from "../pooled-projects";
 import { projectIdentityKey, sessionPathKey } from "../paths";
@@ -327,11 +327,11 @@ function usageStamp(path: string): UsageTranscriptStamp | null {
 
 /** A transcript's usage, whole, and what each record weighs serialized. Null when it was deleted since it was stamped;
  * any other read failure throws. A record no answer has room for is no usage a transcript can hold: it is left out, like
- * any malformed line. */
-function usageRecords(path: string, modelsConfig: ModelsFileConfig, session: string): { records: UsageRecord[]; sizes: number[] } | null {
+ * any malformed line. Prices are read here, with no await before the parse caches them under the transcript's stamp. */
+function usageRecords(path: string, session: string): { records: UsageRecord[]; sizes: number[] } | null {
   let records: UsageRecord[];
   try {
-    records = parseSessionUsage(path, modelsConfig, session, true);
+    records = parseSessionUsage(path, readModelsConfig(), session, true);
   } catch (error) {
     if (isGone(error)) return null;
     throw error;
@@ -882,14 +882,13 @@ export const sessionOps: SessionOps = {
     let bytes = 0;
     try {
       const sessions = new Set(inventorySessionFiles(getSessionsDir()));
-      const modelsConfig = readModelsConfig();
       for (const { session, paths, skip = 0 } of requests) {
         const transcripts = sessions.has(session) ? new Set([session, ...listSessionArtifactTranscripts(session, true)]) : null;
         for (const [at, path] of paths.entries()) {
           if (files.length > 0 && Date.now() - started > USAGE_PAGE_LIMITS.ms) return ok({ files, missing });
           // Stamped before parsing: a write that lands during the parse changes the stamp and is read again next time.
           const stamp = transcripts?.has(path) ? usageStamp(path) : null;
-          const usage = stamp && usageRecords(path, modelsConfig, session);
+          const usage = stamp && usageRecords(path, session);
           if (!stamp || !usage) {
             missing.push(path);
             continue;
