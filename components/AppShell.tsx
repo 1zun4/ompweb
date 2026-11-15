@@ -16,6 +16,7 @@ import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
 import { ConfirmDialog } from "./ui/field";
+import { ThemedSelect } from "./ui/primitives";
 import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
 import { type FileExplorerHandle } from "./FileExplorer";
@@ -39,7 +40,8 @@ import type { WorkspaceFileSource } from "@/lib/workspace-types";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { hostProjectKey, LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
+import { foldedHostProjectKey, hostProjectKey, LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
+import { isClusterTarget } from "@/lib/hosts/cluster";
 import { useHostRows } from "@/hooks/useHostRows";
 import { LocalDaemonBanner } from "./LocalDaemonBanner";
 import { hostName } from "./host-status";
@@ -79,6 +81,7 @@ import type { CrossSessionHostToolCall, ManagedProject, SessionInfo, SessionTree
 import { runHostTool } from "@/hooks/useAgentSession-stream";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { openEventStream } from "@/lib/event-stream";
+import { randomUUID } from "@/lib/random-uuid";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { SettingsTab } from "./SettingsTabs";
@@ -884,8 +887,7 @@ export function AppShell({ appName }: { appName: string }) {
     // Live rect, not state: it always reflects the committed width (custom or
     // fluid default), and keeps this callback above the state declarations
     // without a TDZ cycle. The handle only exists while the panel is open.
-    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
-      ?? RIGHT_PANEL_MIN_WIDTH;
+    const measuredWidth = rightPanelRef.current?.getBoundingClientRect().width;
     // Same --ui-scale ground truth as the left sidebar handle: clientX is in
     // viewport pixels while the panel width is zoomed layout pixels.
     let uiScale = 1;
@@ -896,18 +898,27 @@ export function AppShell({ appName }: { appName: string }) {
     } catch {
       // SSR/unavailable: fall back to unscaled math.
     }
+    const startWidth = measuredWidth === undefined ? RIGHT_PANEL_MIN_WIDTH : measuredWidth / uiScale;
     setRightPanelResizing(true);
+    let frame: number | null = null;
+    const cancelFrame = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+    };
+    const applyWidth = () => {
+      frame = null;
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${pendingRightPanelWidthRef.current}px`);
+    };
     const onMove = (ev: MouseEvent) => {
       // Dragging the left edge left grows the panel: inverse of the sidebar.
-      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
-      // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      pendingRightPanelWidthRef.current = next;
+      pendingRightPanelWidthRef.current = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
+      if (frame === null) frame = requestAnimationFrame(applyWidth);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      cancelFrame();
+      applyWidth();
       rightResizeHandlersRef.current = null;
       setRightPanelResizing(false);
       // Commit the final width so state and the persisted value agree with
@@ -919,7 +930,7 @@ export function AppShell({ appName }: { appName: string }) {
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     pendingRightPanelWidthRef.current = startWidth;
-    rightResizeHandlersRef.current = { onMove, onUp };
+    rightResizeHandlersRef.current = { onMove, onUp, cancelFrame };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   }, [isMobile]);
@@ -931,6 +942,7 @@ export function AppShell({ appName }: { appName: string }) {
     if (!handlers) return;
     window.removeEventListener("mousemove", handlers.onMove);
     window.removeEventListener("mouseup", handlers.onUp);
+    handlers.cancelFrame();
     rightResizeHandlersRef.current = null;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -1026,7 +1038,7 @@ export function AppShell({ appName }: { appName: string }) {
     onRightOpenChange: setRightPanelOpen,
   });
   const pendingRightPanelWidthRef = useRef<number | null>(null);
-  const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void; cancelFrame: () => void } | null>(null);
   useEffect(() => {
     setRightPanelWidth(loadRightPanelWidth());
   }, []);
@@ -1153,7 +1165,7 @@ export function AppShell({ appName }: { appName: string }) {
       if (selectedSession?.poolId === project.poolId && selectedSession.projectId === project.projectId) return;
       if (newSessionPoolProject?.poolId === project.poolId && newSessionPoolProject.projectId === project.projectId) return;
       setNewSessionPoolProject(project);
-      setNewSessionCreation({ id: crypto.randomUUID() });
+      setNewSessionCreation({ id: randomUUID() });
       setNewSessionCwd(null);
       setNewSessionHostId(undefined);
       setSelectedSession(null);
@@ -1193,7 +1205,7 @@ export function AppShell({ appName }: { appName: string }) {
       return prev;
     });
     setNewSessionHostId(remoteHostId(hostId));
-    setNewSessionCreation({ id: crypto.randomUUID() });
+    setNewSessionCreation({ id: randomUUID() });
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
@@ -1240,7 +1252,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSettingsTab(null);
     setSelectedSession(null);
     const target = project ?? (cwd === activeCwd ? activePoolProject : null);
-    setNewSessionCreation({ id: creationId || crypto.randomUUID(), initialization });
+    setNewSessionCreation({ id: creationId || randomUUID(), initialization });
     setNewSessionPoolProject(target?.poolId ? target : null);
     setNewSessionCwd(target?.poolId ? null : cwd);
     setNewSessionHostId(target?.poolId ? undefined : remoteHostId(hostId));
@@ -1313,7 +1325,7 @@ export function AppShell({ appName }: { appName: string }) {
         else navigationHistory.commitForward();
         const project = entry.poolId ? workspaceOptions.projects.find((candidate) => candidate.poolId === entry.poolId && candidate.projectId === entry.projectId) : undefined;
         if (entry.poolId && !project) { toast.error(translate("errors.generic")); return; }
-        handleNewSession(entry.creationId ?? crypto.randomUUID(), entry.cwd, entry.hostId, project, entry.initialization);
+        handleNewSession(entry.creationId ?? randomUUID(), entry.cwd, entry.hostId, project, entry.initialization);
         return;
       }
       const versionAtPress = navViewVersionRef.current;
@@ -1356,7 +1368,7 @@ export function AppShell({ appName }: { appName: string }) {
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
-    onNewSession: (cwd: string) => handleNewSession(crypto.randomUUID(), activePoolProject ? null : cwd, activeHostId, activePoolProject ?? undefined),
+    onNewSession: (cwd: string) => handleNewSession(randomUUID(), activePoolProject ? null : cwd, activeHostId, activePoolProject ?? undefined),
     onNavigateBack: handleNavigateBack,
     onNavigateForward: handleNavigateForward,
     activeCwd: activePoolProject ? projectIdentity(activePoolProject) : activeCwd,
@@ -1501,7 +1513,7 @@ export function AppShell({ appName }: { appName: string }) {
       const cwd = selectedSession.cwd;
       setSelectedSession(null);
       setNewSessionCwd(selectedSession.poolId ? null : cwd ?? null);
-      setNewSessionCreation({ id: crypto.randomUUID() });
+      setNewSessionCreation({ id: randomUUID() });
       setNewSessionPoolProject(selectedSession.poolId ? workspaceOptions.projects.find((project) => project.poolId === selectedSession.poolId && project.projectId === selectedSession.projectId) ?? null : null);
       setNewSessionHostId(remoteHostId(selectedSession.hostId));
       setSessionKey((k) => k + 1);
@@ -1775,11 +1787,19 @@ export function AppShell({ appName }: { appName: string }) {
   const newSessionHost = effectivePoolProject ? undefined : newSessionCwd !== null ? newSessionHostId : activeHostId;
   const newSessionHostKey = effectivePoolProject ? projectTargetId(effectivePoolProject) : newSessionHost ?? LOCAL_HOST_ID;
   const newSessionProject = effectivePoolProject ? projectIdentity(effectivePoolProject) : (workspaceOptions.cwd === effectiveNewSessionCwd && workspaceOptions.hostId === newSessionHostKey ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
-  const hostProjects = workspaceOptions.projects.filter((project) => projectTargetId(project) === newSessionHostKey);
+  // The panel's target is the group the sidebar lists the project under: the cluster for a member's pinned project. The real host (above) is where the session runs.
+  const newSessionGroupKey = projectTargetId(effectivePoolProject ?? { hostId: newSessionHostKey }, pools);
+  // Pool projects first (stable), as in the sidebar's cluster group.
+  const hostProjects = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === newSessionGroupKey).sort((a, b) => Number(Boolean(b.poolId)) - Number(Boolean(a.poolId)));
+  // Two members' projects can share a path, so a non-pool option's value carries its host.
+  const newSessionWorkspaceValue = effectivePoolProject ? projectIdentity(effectivePoolProject) : effectiveNewSessionCwd ? hostProjectKey(newSessionHost, effectiveNewSessionCwd) : "";
   const memberIds = new Set(pools.flatMap((pool) => pool.members.map((member) => member.hostId)));
   const creationTargets = [...(hosts ?? []).filter((host) => !memberIds.has(host.id) && (poolsLoaded || host.id === LOCAL_HOST_ID)).map((host) => ({ id: host.id, label: hostName(t, host) })), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
   const chatHost = remoteHost ? hosts?.find((host) => host.id === currentHostId) : undefined;
   const settingsHostId = activeCwd ? activeHostId : currentHostId;
+  // What Settings act for, as settingsHostId picks it: the sidebar's project, else the open session, the new chat, the pool project.
+  const settingsTarget = activeCwd ? { hostId: activeHostId } : selectedSession ?? (newSessionCwd !== null ? { hostId: newSessionHostId } : effectivePoolProject);
+  const clusterSettings = isClusterTarget(settingsTarget, settingsHostId, pools);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null || effectivePoolProject !== null;
   const currentRate = generationSpeed?.current;
   const rate = currentRate ?? generationSpeed?.average;
@@ -1855,6 +1875,8 @@ export function AppShell({ appName }: { appName: string }) {
     ready: mobileSidebarReady,
     sidebarOpen,
     setSidebarOpen,
+    panelOpen: rightPanelIsModal,
+    closePanel: closeRightPanel,
     url: searchParams.toString(),
   });
   useEffect(() => {
@@ -1961,7 +1983,7 @@ export function AppShell({ appName }: { appName: string }) {
           // useAgentSession refuses to start — every send a silent no-op.
           // Fall back to the server's default cwd (~/omp-cwd-<date>) instead.
           if (activeCwd || activePoolProject) {
-            handleNewSession(crypto.randomUUID(), activeCwd, activeHostId, activePoolProject ?? undefined);
+            handleNewSession(randomUUID(), activeCwd, activeHostId, activePoolProject ?? undefined);
             return;
           }
           const targetHost = currentHostId ?? LOCAL_HOST_ID;
@@ -1975,7 +1997,7 @@ export function AppShell({ appName }: { appName: string }) {
             })
             .then((data) => {
               if (!data.cwd) throw new Error("Empty cwd returned");
-              if (navViewVersionRef.current === sourceVersion) handleNewSession(crypto.randomUUID(), data.cwd, targetHost);
+              if (navViewVersionRef.current === sourceVersion) handleNewSession(randomUUID(), data.cwd, targetHost);
             })
             .catch(() => toast.error(translate("errors.generic")));
         }}
@@ -2120,6 +2142,7 @@ export function AppShell({ appName }: { appName: string }) {
             onOpenUrlAutomaticallyChange={handleOpenUrlAutomaticallyChange}
             cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
             remoteHost={settingsHostId !== undefined}
+            cluster={clusterSettings}
             sessionId={selectedSession?.id ?? null}
             onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
             onPluginsReloaded={() => setSessionKey((k) => k + 1)}
@@ -2543,25 +2566,26 @@ export function AppShell({ appName }: { appName: string }) {
                         <span className="new-session-workspace-icon" aria-hidden="true">
                           <Server size={17} strokeWidth={1.8} />
                         </span>
-                        <select
+                        <ThemedSelect
+                          className="workspace-select-trigger"
                           id="new-session-host"
-                          value={newSessionHostKey}
-                          onChange={(event) => {
-                            const first = workspaceOptions.projects.find((project) => projectTargetId(project) === event.target.value);
-                            if (!first || event.target.value === newSessionHostKey) return;
+                          value={newSessionGroupKey}
+                          onChange={(key) => {
+                            const matches = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === key);
+                            const first = matches.find((project) => project.poolId) ?? matches[0];
+                            if (!first || key === newSessionGroupKey) return;
                             suppressCwdRef.current = first.path;
                             setActivePoolProject(first.poolId ? first : null);
                             setActiveCwd(first.poolId ? null : first.path);
                             setActiveHostId(first.poolId ? undefined : remoteHostId(first.hostId));
-                            handleNewSession(crypto.randomUUID(), first.poolId ? null : first.path, first.hostId, first);
+                            handleNewSession(randomUUID(), first.poolId ? null : first.path, first.hostId, first);
                           }}
-                        >
-                          {creationTargets.map((target) => (
-                            <option key={target.id} value={target.id} disabled={!workspaceOptions.projects.some((project) => projectTargetId(project) === target.id)}>
-                              {target.label}
-                            </option>
-                          ))}
-                        </select>
+                          options={creationTargets.map((target) => ({
+                            value: target.id,
+                            label: target.label,
+                            disabled: !workspaceOptions.projects.some((project) => projectTargetId(project, pools) === target.id),
+                          }))}
+                        />
                         <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                       </div>
                     </>
@@ -2573,31 +2597,36 @@ export function AppShell({ appName }: { appName: string }) {
                     <span className="new-session-workspace-icon" aria-hidden="true">
                       <Folder size={17} strokeWidth={1.8} />
                     </span>
-                    <select
+                    <ThemedSelect
+                      className="workspace-select-trigger"
                       id="new-session-workspace"
                       aria-describedby="new-session-workspace-path"
-                      value={effectivePoolProject ? projectIdentity(effectivePoolProject) : effectiveNewSessionCwd ?? ""}
-                      onChange={(event) => {
-                        const key = event.target.value;
-                        if (!key) { openAddProject(true, newSessionHostKey); return; }
-                        const project = hostProjects.find((candidate) => projectIdentity(candidate) === key || (!candidate.poolId && candidate.path === key));
+                      value={newSessionWorkspaceValue}
+                      onChange={(key) => {
+                        if (!key) { openAddProject(true, newSessionGroupKey); return; }
+                        const project = hostProjects.find((candidate) => projectIdentity(candidate) === key || (!candidate.poolId && hostProjectKey(candidate.hostId, candidate.path) === key));
                         if (!project) return;
                         suppressCwdRef.current = project.path;
                         setActivePoolProject(project.poolId ? project : null);
                         setActiveCwd(project.poolId ? null : project.path);
-                        handleNewSession(crypto.randomUUID(), project.poolId ? null : project.path, project.hostId, project);
+                        setActiveHostId(project.poolId ? undefined : remoteHostId(project.hostId));
+                        handleNewSession(randomUUID(), project.poolId ? null : project.path, project.hostId, project);
                       }}
-                    >
-                      {!effectivePoolProject && effectiveNewSessionCwd && !hostProjects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(newSessionProject)) && (
-                        <option value={effectiveNewSessionCwd}>{projectLabel(effectiveNewSessionCwd)}</option>
-                      )}
-                      {hostProjects.map((project) => (
-                        <option key={projectIdentity(project)} value={project.poolId ? projectIdentity(project) : comparableProjectPath(project.path) === comparableProjectPath(newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path}>
-                          {project.alias ?? project.name ?? projectLabel(project.path)}
-                        </option>
-                      ))}
-                      <option value="">+ {t("projects.add")}</option>
-                    </select>
+                      options={[
+                        ...(!effectivePoolProject && effectiveNewSessionCwd && !hostProjects.some((project) => foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject))
+                          ? [{ value: newSessionWorkspaceValue, label: projectLabel(effectiveNewSessionCwd) }] : []),
+                        ...hostProjects.map((project) => {
+                          const name = project.alias ?? project.name ?? projectLabel(project.path);
+                          // A member's pinned project: its option names the node.
+                          const node = !project.poolId && projectTargetId(project, pools) !== (project.hostId ?? LOCAL_HOST_ID) ? hosts?.find((host) => host.id === (project.hostId ?? LOCAL_HOST_ID)) : undefined;
+                          return {
+                            value: project.poolId ? projectIdentity(project) : hostProjectKey(project.hostId, foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path),
+                            label: node ? t("hosts.projectOnNode", { name, node: hostName(t, node) }) : name,
+                          };
+                        }),
+                        { value: "", label: t("projects.add"), action: true },
+                      ]}
+                    />
                     <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                   </div>
                   {/* The workspace's worktrees: picking one sets where the new
@@ -2608,16 +2637,14 @@ export function AppShell({ appName }: { appName: string }) {
                       <span className="new-session-workspace-icon" aria-hidden="true">
                         <GitBranch size={17} strokeWidth={1.8} />
                       </span>
-                      <select
+                      <ThemedSelect
+                        className="workspace-select-trigger"
                         aria-label={t("sessionSidebar.switchWorktree")}
                         aria-describedby="new-session-workspace-path"
                         value={worktreeCtx.currentPath}
-                        onChange={(event) => worktreeCtx.select(event.target.value)}
-                      >
-                        {worktreeCtx.worktrees.map((wt) => (
-                          <option key={wt.path} value={wt.path}>{wt.branch ?? getFileName(wt.path)}</option>
-                        ))}
-                      </select>
+                        onChange={(path) => worktreeCtx.select(path)}
+                        options={worktreeCtx.worktrees.map((wt) => ({ value: wt.path, label: wt.branch ?? getFileName(wt.path) }))}
+                      />
                       <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                     </div>
                   )}

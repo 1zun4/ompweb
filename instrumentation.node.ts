@@ -79,6 +79,14 @@ export async function register(): Promise<void> {
     console.warn(`[omp-web] upload retention sync not started: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // Cluster members run on this machine's omp configuration: every 30 s a member that is behind gets it (lib/hosts/hub.ts).
+  try {
+    const { startClusterConfigSync } = await import("@/lib/hosts/hub");
+    startClusterConfigSync();
+  } catch (error) {
+    console.warn(`[omp-web] cluster configuration sync not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Resume sessions that were mid-run when omp-web last stopped (opt-in
   // setting). Fire-and-forget: resuming must not block boot.
   void (async () => {
@@ -96,6 +104,14 @@ export async function register(): Promise<void> {
     startOutbox();
   } catch (error) {
     console.warn(`[omp-web] message outbox not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // GitHub watches post their updates through that outbox, so they start after it (lib/github/watcher.ts).
+  try {
+    const { startGithubWatcher } = await import("@/lib/github/watcher");
+    startGithubWatcher();
+  } catch (error) {
+    console.warn(`[omp-web] github watcher not started: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // Crash/stall journal: a long-running server that dies or wedges while the

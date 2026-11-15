@@ -36,7 +36,8 @@ import {
   uploadRecovery,
   type AttachedUpload,
 } from "./ChatInput-uploads";
-import { discardUpload, newUploadId, uploadFile, UploadFailedError, type UploadHandle } from "@/lib/event-stream";
+import { discardUpload, uploadFile, UploadFailedError, type UploadHandle } from "@/lib/event-stream";
+import { randomUUID } from "@/lib/random-uuid";
 import { MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE } from "@/lib/upload-limits";
 import { hostProjectKey, LOCAL_HOST_ID } from "@/lib/project-ordering";
 import {
@@ -479,6 +480,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   // "!" shares output with the model (riskier, root-style warning); "!!" stays local (plain terminal).
   const shellMode = bashMode ? (bashExcluded ? "local" : "model") : undefined;
+  // Side questions stay separate from the main run's queue and Stop action. Without builtin dispatch `/btw` is
+  // ordinary text, so the composer keeps its Queue fallback.
+  const btwMode = Boolean(onBuiltinCommand) && /^\/btw(\s|$)/.test(trimmedValue);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashMatch, setSlashMatch] = useState<SlashQueryMatch | null>(null);
@@ -721,7 +725,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ({ proof }) => settle({ status: "done", received: size, error: null, proof }),
       // 410: the worker already cancelled it on its host (the page went into the back/forward cache). A Retry under a
       // new id starts over, so the cancel still pending for this one can never reach it.
-      (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: newUploadId(), proof: undefined } : {}) }),
+      (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: randomUUID(), proof: undefined } : {}) }),
     );
   }, [patchUpload, t]);
 
@@ -732,7 +736,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const room = Math.max(0, MAX_UPLOADS_PER_MESSAGE - attachedUploadsRef.current.length);
     const fitting = files.flatMap((file, i) => (file.size <= MAX_UPLOAD_BYTES ? [{ file, previewUrl: previewUrls[i] }] : []));
     const added = fitting.slice(0, room).map(({ file, previewUrl }): AttachedUpload => ({
-      id: newUploadId(),
+      id: randomUUID(),
       name: file.name,
       size: file.size,
       hostId: resolveUploadHostRef.current ? "" : uploadHostIdRef.current,
@@ -1283,9 +1287,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     // `!cmd` runs right away during a run too, as in omp's terminal; it is never queued as text.
     const shellCommand = !promptOnlyRef.current && msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
-    if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
+    if (submissionBlockedRef.current || holdingRef.current) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
+    if (isStreaming && !shellCommand) return;
     if (rejectsPendingUploads()) return;
     const files = attachedTextFilesRef.current;
     const composedMessage = composeMessageWithTextAttachments(msg, files);
@@ -1370,7 +1375,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         toast.success(t("chatInput.dictationSuccess"));
         return;
       }
-      if (after && onFollowUp) {
+      if (after && sendSideQuestion(finalText.trim(), finalText)) {
+        return;
+      } else if (after && onFollowUp) {
         sendQueued(after === "send" ? "followup" : after, finalText);
       } else if (after && !isStreaming) {
         void handleSend(finalText);
@@ -1502,7 +1509,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           return modelCollator.compare(a.name, b.name);
         });
     }
-    const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
+    // During a run the other builtins would only be queued as text; /btw runs beside the main run.
+    const commands = [...(isStreaming ? builtinSlashCommands.filter((command) => command.name === "btw") : builtinSlashCommands), ...externalSlashCommands];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -1859,7 +1867,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const imageUploads = attachedUploads.filter((upload) => upload.previewUrl !== null);
   const fileUploads = attachedUploads.filter((upload) => upload.previewUrl === null);
   const primaryActionQueuesMessage =
-    isStreaming
+    isStreaming && !btwMode
     && (Boolean(value.trim()) || hasAttachments || dictationCapturing)
     && Boolean(onFollowUp);
   // The button follows the same Settings choice as Enter: soft keyboards have no
@@ -3180,7 +3188,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             aria-live="polite"
             data-shell={shellMode}
             style={{
-              border: "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
+              border: btwMode ? "1px solid var(--accent)" : "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
               borderBottom: "none",
               borderRadius: queuedCount > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
               background: "var(--bg-panel)",
@@ -3205,8 +3213,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             style={{
               display: "flex",
               flexDirection: "column",
-              background: "var(--shell-bg, var(--bg))",
-              border: "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
+              background: btwMode ? "color-mix(in srgb, var(--accent) 8%, var(--bg))" : "var(--shell-bg, var(--bg))",
+              border: btwMode ? "1px solid var(--accent)" : "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
               borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
@@ -3960,7 +3968,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
                 {t(primaryActionRunsShell ? "chatInput.runShell" : primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
               </button>
-            ) : isStreaming ? (
+            ) : isStreaming && !btwMode ? (
               <button
                 type="button"
                 className="composer-primary-action"
@@ -3988,8 +3996,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action"
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
-                disabled={submissionBlocked || isTranscribing || uploadsBlockSend || !(isRecording || isPaused || isReviewing || value.trim() || hasAttachments)}
-                title={uploadsBlockSend
+                disabled={submissionBlocked || isTranscribing || (!btwMode && uploadsBlockSend) || !(isRecording || isPaused || isReviewing || value.trim() || hasAttachments)}
+                title={!btwMode && uploadsBlockSend
                   ? (failedUploadCount > 0 ? t("chatInput.uploadsFailedBlock", { count: failedUploadCount }) : t("chatInput.uploadsWaiting", { count: uploadingCount }))
                   : isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
                 style={{
@@ -3998,14 +4006,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   border: "none",
                   borderRadius: 8,
                   color: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--on-accent)" : "var(--text-dim)",
-                  cursor: submissionBlocked || uploadsBlockSend ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || hasAttachments) ? "pointer" : "not-allowed",
+                  cursor: submissionBlocked || (!btwMode && uploadsBlockSend) ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || hasAttachments) ? "pointer" : "not-allowed",
                   fontSize: 12,
                   fontWeight: 600,
                   boxShadow: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--shadow-card)" : "none",
                   transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                {isTranscribing || uploadingCount > 0 ? (
+                {isTranscribing || (!btwMode && uploadingCount > 0) ? (
                   <Loader2 size={12} strokeWidth={2} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -4013,7 +4021,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <polyline points="7.5 3 12 7 7.5 11" />
                   </svg>
                 )}
-                {uploadingCount > 0 ? t("chatInput.uploadsPending", { count: uploadingCount }) : t("chatInput.send")}
+                {!btwMode && uploadingCount > 0 ? t("chatInput.uploadsPending", { count: uploadingCount }) : t("chatInput.send")}
               </button>
             )}
           </div>

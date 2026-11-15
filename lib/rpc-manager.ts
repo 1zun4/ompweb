@@ -1,3 +1,5 @@
+// The "rpc" in this file's name (and in RpcProcess/RpcTransport, lib/omp/rpc-*.ts) is a leftover: sessions no
+// longer use omp's RPC mode. They run on ompweb's own omp runner channel (docs/specs/2026-11-12-omp-runner-design.md).
 import { createHash, randomUUID } from "crypto";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
@@ -5,7 +7,6 @@ import { applyMessageDelta, isDeltaUpdate, withStreamedArguments } from "./messa
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import type { RpcTransport } from "./omp/rpc-transport";
-import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
 import { cacheSessionPath } from "./session-reader";
 import { allowFileRoot } from "./file-access";
 import { loadWebServerSettings } from "./web-settings";
@@ -15,17 +16,19 @@ import {
   AgentToolGuard,
   executeAgentTool,
   type AgentToolContext,
+  type AgentToolDeliverInput,
   type AgentToolDeliverResult,
   type AgentToolSessionOps,
 } from "./agent-tools";
+import type { AgentToolHost } from "./agent-tool-hosts";
+import { createGithubToolOps, GITHUB_REPLAY_SAFE_TOOLS, GITHUB_TOOL_NAMES } from "./github/tools";
 import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { isClientMessageId, readQueueSnapshot } from "./client-message-ids";
-import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
+import { createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
-import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
@@ -38,7 +41,7 @@ import type {
 import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./hosts/host";
 import { freezeHostLinks, getHost, hostOwnsLifecycle, isNotifier, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
-import { CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
+import { CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, PEER_MESSAGE_FRAME, PEER_PROMPT_OUTCOME_FRAME } from "./hosts/link-protocol";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
@@ -50,6 +53,13 @@ import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } f
 // ============================================================================
 // Types
 // ============================================================================
+
+/** The runner's `edit_message` result: the leaf moved to just before the edited user message. */
+export interface SessionEditResult {
+  sessionId: string;
+  cancelled: boolean;
+  leafId: string | null;
+}
 
 export interface AgentEvent {
   type: string;
@@ -90,6 +100,10 @@ const DISCONNECT_DESTROY_MS = process.env.OMP_WEB_DISCONNECT_DESTROY_MS !== unde
 const READY_TIMEOUT_MS = 120_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
 const GET_STATE_TIMEOUT_MS = 5_000;
+/** The handshake of a just-started or rejoined child: omp's post-`ready` startup work (model refresh, plugin and
+ * marketplace updates, hooks) can hold its first answers well past GET_STATE_TIMEOUT_MS. */
+const STARTUP_COMMAND_TIMEOUT_MS = 30_000;
+const EDIT_TIMEOUT_MS = 15_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
  * omp acks a prompt as soon as it accepts it and the run then reports through
  * events (agent_start/agent_end), so an ack that never arrives means the child
@@ -110,10 +124,11 @@ const RENAME_OUTPUT_RE = /^(Session renamed to |Could not generate a session tit
 const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
-const BASH_EXCLUDE_MESSAGE =
-  "Nothing was run: this session cannot confirm shell output exclusion (`!!`). Use OMP 18.18.1 or newer, update and restart the ompweb host daemon (including This machine), then reload the session.";
 /** Answer to a replayed server agent tool call that changes things: it may have run before the restart. */
 const AGENT_TOOL_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with list_sessions before retrying";
+const GITHUB_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with github_read (include comments or threads) before retrying";
+/** A GitHub write is checked on GitHub, not in the session list. */
+const unknownOutcome = (toolName: unknown) => (typeof toolName === "string" && GITHUB_TOOL_NAMES.has(toolName) ? GITHUB_UNKNOWN_OUTCOME : AGENT_TOOL_UNKNOWN_OUTCOME);
 
 /**
  * Failure raised by omp-web itself (not by omp) carrying a stable snake_case
@@ -132,16 +147,6 @@ export class WebRpcError extends Error {
     this.code = code;
     if (delivery) this.delivery = delivery;
   }
-}
-
-/** Shape check for an ask-dialog `answers` payload; omp validates the content. */
-function isAskAnswers(value: unknown): boolean {
-  return Array.isArray(value) && value.every((answer: unknown) =>
-    isRecord(answer)
-    && typeof answer.id === "string"
-    && Array.isArray(answer.selectedOptions)
-    && answer.selectedOptions.every((option: unknown) => typeof option === "string")
-    && (answer.customInput === undefined || typeof answer.customInput === "string"));
 }
 
 // Commands forwarded to omp verbatim (request shape already matches rpc-types).
@@ -194,7 +199,6 @@ const UNSUPPORTED_COMMANDS: Record<string, string> = {
   clear_queue: "Recalling queued messages is not supported over the omp RPC protocol",
   get_tools: "Per-session tool listing is not supported over the omp RPC protocol",
   set_tools: "Changing tools on a running session is not supported over the omp RPC protocol; tool presets apply to new sessions",
-  extension_ui_input: "Extension custom UI is not supported over the omp RPC protocol",
 };
 
 function toImageContents(value: unknown): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
@@ -221,7 +225,7 @@ function patchEstimatedTokensAfter(result: unknown): void {
 
 // ============================================================================
 // AgentSessionWrapper
-// Wraps one spawned `omp --mode rpc-ui` process with the interface the rest of
+// Wraps one session's ompweb-omp runner (its channel, runner/src/channel.ts) with the interface the rest of
 // the app expects (same command surface pi-web's in-process wrapper offered).
 // ============================================================================
 
@@ -486,6 +490,7 @@ export class AgentSessionWrapper {
   /** Retained until native adoption has replayed pending requests and released live frames. */
   private adoptionReplay?: string[];
   private restarting = false;
+  private restartingProc: RpcProcess | null = null;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Synchronous mutex for getMcpList: checked+set before any await, so two
    *  concurrent callers can never both enter (the waiter/promptRunning
@@ -504,6 +509,8 @@ export class AgentSessionWrapper {
   private _adopted = false;
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools = new Map<string, { event: UnsequencedAgentEvent; crossSessionId?: string }>();
+  /** Server-side agent tool calls in flight (answerServerAgentTool); host_tool_cancel aborts them. */
+  private serverToolCalls = new Map<string, AbortController>();
   /** Own host calls no tab has seen yet (see parkHostTool), with their deadlines. */
   private parkedHostTools = new Map<string, ReturnType<typeof setTimeout>>();
   /** Listeners omp-web attaches itself (waitForTurnEnd), not tabs: a parked host call waits for a tab. */
@@ -600,6 +607,20 @@ export class AgentSessionWrapper {
       || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0);
   }
 
+  isAwaitingInput(): boolean {
+    return this.pendingUiRequests.size > 0;
+  }
+
+  /** An open ask (askDialog/formDialog): omp's ask tool aborts on a user steer ("Ask interrupted by message"). */
+  isAwaitingAsk(): boolean {
+    for (const event of this.pendingUiRequests.values()) if (isAskRequest(event)) return true;
+    return false;
+  }
+
+  private notifyAskClosed(): void {
+    for (const listener of globalThis.__ompAskClosedListeners ?? []) listener(this._sessionId);
+  }
+
   /** Local history navigation is busy control work, not an interruptible model turn. */
   isEditingHistory(): boolean {
     return this.historyEditInFlight;
@@ -614,6 +635,7 @@ export class AgentSessionWrapper {
     if (!this.hostOwnedLifecycle || !this.canReplaceAdvisor()) return null;
     const old = this.proc;
     this.restarting = true;
+    this.restartingProc = old;
     this.expectedExitProc = old;
     try {
       const spawned = await this.host.spawnRpc(launch, this._sessionId, { replaceAdvisor: true, preparing });
@@ -626,6 +648,7 @@ export class AgentSessionWrapper {
       throw error;
     } finally {
       if (this.expectedExitProc === old) this.expectedExitProc = null;
+      if (this.restartingProc === old) this.restartingProc = null;
       this.restarting = false;
     }
   }
@@ -738,8 +761,9 @@ export class AgentSessionWrapper {
   }
 
   start(): void {
-    this.unsubscribeFrames = this.proc.onFrame((frame) => this.handleFrame(frame));
-    this.watchResync(this.proc);
+    const proc = this.proc;
+    this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame, proc));
+    this.watchResync(proc);
     this.unsubscribeHostStatus = this.host.onStatus((status) => this.handleHostStatus(status));
     this.reportInterest();
     this.resetIdleTimer();
@@ -773,10 +797,10 @@ export class AgentSessionWrapper {
       if (this.hostOwnedLifecycle) {
         this.clearLiveSnapshots();
         this.recoveringUpdates = false;
-        for (const id of [...this.pendingUiRequests.keys()]) {
+        for (const [id, event] of [...this.pendingUiRequests]) {
           if (this.serverUiRequests.has(id)) continue;
           this.forgetPendingUiRequest(id);
-          this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+          this.emit({ type: "ui_end", id: event.id });
         }
       }
       void this.reconcileAfterGap();
@@ -840,13 +864,11 @@ export class AgentSessionWrapper {
     this.reportInterest();
     try {
       if (!this.hostOwnedLifecycle) {
-        const ready = await this.proc.waitReady(READY_TIMEOUT_MS);
-        await this.proc.negotiateProtocol(ready);
+        await this.proc.waitReady(READY_TIMEOUT_MS);
         await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
-        await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
         await this.enableDeltaUpdates(this.proc);
       }
-      const state = await this.getStateWithTimeout();
+      const state = await this.getStateWithTimeout(STARTUP_COMMAND_TIMEOUT_MS);
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
       // This happens when the recorded cwd was deleted (removed worktree, moved
@@ -929,23 +951,23 @@ export class AgentSessionWrapper {
     this.reportInterest();
     this._adopted = joined;
     this.hostToolsUnknown = true;
-    // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
-    const optional = (command: { type: string; [key: string]: unknown }) => this.proc.sendCommand(command, GET_STATE_TIMEOUT_MS).then(() => {}, (error) => {
+    // A refusal is tolerated, as at startup; a timeout or an exit fails the adoption.
+    const optional = (command: { type: string; [key: string]: unknown }, timeoutMs = STARTUP_COMMAND_TIMEOUT_MS) => this.proc.sendCommand(command, timeoutMs).then(() => {}, (error) => {
       if (!(error instanceof RpcCommandError)) throw error;
     });
     try {
       if (!this.hostOwnedLifecycle) {
-        await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
+        await this.proc.waitReady();
         await optional({ type: "set_subagent_subscription", level: "events" });
-        await optional({ type: "set_ask_dialog", enabled: true });
         await this.enableDeltaUpdates(this.proc);
       }
       // omp's state has no shell-command flag: a `!!` command the lost server started
       // leaves bashRunning false, and its result arrives as an unsolicited response.
-      this.applyIdentity(await this.getStateWithTimeout());
+      this.applyIdentity(await this.getStateWithTimeout(STARTUP_COMMAND_TIMEOUT_MS));
       // The wrapper keeps neither (a tab reads both when it attaches): a child that cannot answer them fails here instead.
-      await optional({ type: "get_subagents" });
-      await optional({ type: "get_btw_history" });
+      // get_state answered, so omp's startup work is over: these reads keep the status-poll budget.
+      await optional({ type: "get_subagents" }, GET_STATE_TIMEOUT_MS);
+      await optional({ type: "get_btw_history" }, GET_STATE_TIMEOUT_MS);
       this.replaying = true;
       try {
         this.proc.replay(this.adoptionReplay ?? []);
@@ -979,6 +1001,7 @@ export class AgentSessionWrapper {
     // live stream and run state must survive; only the id changes.
     const moved = identityChanged && this.sessionMovePending;
     if (identityChanged && !moved) {
+      this.abortServerToolCalls();
       this.resetStream();
       this.promptRunning = false;
       this.awaitingAgentStart = false;
@@ -1180,27 +1203,28 @@ export class AgentSessionWrapper {
     }
   }
 
-  private handleFrame(frame: RpcFrame): void {
-    // The helper has its own process listener. Its correlated control replies
-    // must never become browser notices, replayed dialogs, or notifications,
-    // even when they arrive after a failed/timed-out edit.
-    if (isSessionEditReply(frame)) return;
+  private handleFrame(frame: RpcFrame, sourceProc: RpcProcess = this.proc): void {
     this.resetIdleTimer();
-    const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
-      ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
-      : frame;
+    const event = frame;
     if (event.type === PEER_MESSAGE_FRAME) {
       this.peerMessageCommands += 1;
+      return;
+    }
+    if (event.type === PEER_PROMPT_OUTCOME_FRAME) {
+      // Another server's prompt ended: only the notification detector reads it (that server owns the prompt's state).
+      const { t: type, ...outcome } = isRecord(event.outcome) ? event.outcome : {};
+      if (type === "prompt_result") this.publishNotifications({ ...outcome, type });
+      else if (type === "prompt_error") this.publishNotifications({ ...outcome, type, errorMessage: typeof outcome.error === "string" ? outcome.error : "Prompt failed" });
       return;
     }
     if (this.hostOwnedLifecycle && (event.type === "host_tool_call" || event.type === "host_uri_request") && typeof event.id === "string") {
       const key = `${event.type}:${event.id}`;
       if (this.deliveredCallbacks.has(key)) return;
       this.deliveredCallbacks.add(key);
-      // Only the read-only listing runs again (handled below); anything else may already have run.
-      if (this.replaying && !(event.type === "host_tool_call" && event.toolName === "list_sessions")) {
+      // Only the read-only listing and the idempotent GitHub tools run again (handled below); anything else may already have run.
+      if (this.replaying && !(event.type === "host_tool_call" && typeof event.toolName === "string" && (event.toolName === "list_sessions" || GITHUB_REPLAY_SAFE_TOOLS.has(event.toolName)))) {
         this.proc.sendFrame(event.type === "host_tool_call"
-          ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] } }
+          ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: unknownOutcome(event.toolName) }] } }
           : { type: "host_uri_result", id: event.id, isError: true, error: AGENT_TOOL_UNKNOWN_OUTCOME });
         return;
       }
@@ -1302,51 +1326,29 @@ export class AgentSessionWrapper {
         this.invalidateSessionLists();
         refreshSessionList = true;
         break;
-      case "skill_diagnostics_update":
-        this.emit({
-          type: "skill_diagnostics_update",
-          data: parseSkillDiagnosticsSnapshot(event.data),
-        });
+      case "prompt_error": {
+        // An async prompt failure: terminal, no agent_end follows. Tabs and notifications read `errorMessage`.
+        this.promptRunning = false;
+        this.awaitingAgentStart = false;
+        this.awaitingAgentStartDeadline = 0;
+        const promptError = { ...event, errorMessage: typeof event.error === "string" ? event.error : "Prompt failed" };
+        this.publishNotifications(promptError);
+        this.emit(promptError);
         notifyRunningChange();
         return;
-      case "response": {
-        // Unsolicited failed responses surface async prompt failures (omp
-        // reuses the original command id after the immediate ack). Some omp
-        // versions omit `command` on that second response, so the active run
-        // is also a terminal-failure signal. Otherwise this frame would be
-        // ignored and the UI would stop with no explanation.
-        if (event.success === false) {
-          const promptFailure =
-            event.command === "prompt" ||
-            (!event.command && (this.promptRunning || this.streaming));
-          const detail = typeof event.error === "string"
-            ? event.error
-            : typeof event.message === "string"
-              ? event.message
-              : "RPC command failed";
-          if (!promptFailure) {
-            this.emit({ type: "error", error: event.error, message: detail, command: event.command });
-            notifyRunningChange();
-            return;
-          }
-          this.promptRunning = false;
-          this.awaitingAgentStart = false;
-          this.awaitingAgentStartDeadline = 0;
-          const promptError = { type: "prompt_error", errorMessage: detail, error: event.error, command: event.command };
-          this.publishNotifications(promptError);
-          this.emit(promptError);
+      }
+      case "ui_request":
+        if (this.trackUiRequest(event)) {
           notifyRunningChange();
           return;
         }
         break;
-      }
-      case "extension_ui_request": {
-        if (this.trackExtensionUiRequest(event)) {
-          notifyRunningChange();
-          return;
-        }
+      case "ui_end":
+        this.forgetPendingUiRequest(String(event.id));
         break;
-      }
+      case "ui":
+        this.trackPresentation(event);
+        break;
       case "host_tool_call": {
         const id = typeof event.id === "string" ? event.id : "";
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
@@ -1355,15 +1357,15 @@ export class AgentSessionWrapper {
         // is an explicit error, not a silent hang and not a browser call.
         if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
           // Independent pooled creations have durable native-request identity; other mutations stay unknown.
-          if (this.replaying && toolName !== "list_sessions" && (toolName !== "new_session" || !loadWebServerSettings().agentToolsEnabled)) {
+          if (this.replaying && toolName !== "list_sessions" && !GITHUB_REPLAY_SAFE_TOOLS.has(toolName) && (toolName !== "new_session" || !loadWebServerSettings().agentToolsEnabled)) {
             this.proc.sendFrame({
               type: "host_tool_result",
               id,
               isError: true,
-              result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] },
+              result: { content: [{ type: "text", text: unknownOutcome(toolName) }] },
             });
           } else if (loadWebServerSettings().agentToolsEnabled) {
-            void this.answerServerAgentTool(event);
+            void this.answerServerAgentTool(event, sourceProc);
           } else {
             this.proc.sendFrame({
               type: "host_tool_result",
@@ -1418,6 +1420,7 @@ export class AgentSessionWrapper {
       }
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
+        this.serverToolCalls.get(targetId)?.abort();
         if (targetId && this.cancelPendingHostTool(targetId)) {
           notifyRunningChange();
           return;
@@ -1465,7 +1468,10 @@ export class AgentSessionWrapper {
 
   /** Forget a pending dialog and its expiry timer. */
   private forgetPendingUiRequest(id: string): void {
-    this.pendingUiRequests.delete(id);
+    const wasAsk = isAskRequest(this.pendingUiRequests.get(id));
+    // An answered or expired dialog no longer waits on the user: the sidebar follows.
+    if (this.pendingUiRequests.delete(id)) notifyRunningChange();
+    if (wasAsk && !this.isAwaitingAsk()) this.notifyAskClosed();
     const timer = this.uiExpiryTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -1474,10 +1480,12 @@ export class AgentSessionWrapper {
   }
 
   private clearPendingUiRequests(): void {
+    const hadAsk = this.isAwaitingAsk();
     this.dropServerUiRequests();
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
+    if (hadAsk) this.notifyAskClosed();
   }
 
   /** Settle every server dialog as declined and close it in attached tabs. */
@@ -1485,7 +1493,7 @@ export class AgentSessionWrapper {
     for (const [id, resolve] of this.serverUiRequests) {
       this.serverUiRequests.delete(id);
       this.forgetPendingUiRequest(id);
-      this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+      this.emit({ type: "ui_end", id });
       resolve(false);
     }
   }
@@ -1495,51 +1503,67 @@ export class AgentSessionWrapper {
    * replay and input-needed notification. Resolves false when declined, when
    * the run ends, or when the session stops.
    */
-  confirmFromServer(title: string): Promise<boolean> {
-    if (!this._alive) return Promise.resolve(false);
+  confirmFromServer(title: string, signal?: AbortSignal): Promise<boolean> {
+    if (!this._alive || signal?.aborted) return Promise.resolve(false);
     const id = `omp-web:${randomUUID()}`;
     const { promise, resolve } = Promise.withResolvers<boolean>();
-    this.serverUiRequests.set(id, resolve);
-    this.handleFrame({ type: "extension_ui_request", id, method: "confirm", title, message: "" });
+    const finish = (confirmed: boolean) => {
+      signal?.removeEventListener("abort", abort);
+      resolve(confirmed);
+    };
+    const abort = () => {
+      if (!this.serverUiRequests.delete(id)) return;
+      this.forgetPendingUiRequest(id);
+      this.emit({ type: "ui_end", id });
+      finish(false);
+    };
+    this.serverUiRequests.set(id, finish);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    else this.handleFrame({ type: "ui_request", id, method: "confirm", args: [title, ""] });
     return promise;
   }
 
-  private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
-    const method = event.method as string;
-    const id = event.id as string;
-    if (method === "cancel") {
-      this.forgetPendingUiRequest(event.targetId as string);
-      return false;
-    }
-    // Only the “Allow tool: <name>” confirmation is covered. Other extension
-    // prompts, including login/editor confirmations, remain interactive.
-    if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && this.host.autoApproveExtension()) {
-      this.forgetPendingUiRequest(id);
-      this.proc.sendFrame({ type: "extension_ui_response", id, confirmed: true });
-      return true;
-    }
-    // Blocking dialogs stay pending until the client answers (replayed to
-    // newly-attached SSE listeners so dialogs survive reconnects).
-    if (BLOCKING_UI_METHODS.has(method)) {
-      this.forgetPendingUiRequest(id);
-      const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
-      if (timeout && timeout > 0) {
-        event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
-        timer.unref?.();
-        this.uiExpiryTimers.set(id, timer);
+  /** Records a runner dialog as pending; true when it was answered here (auto-approve) and must not reach the browser. */
+  private trackUiRequest(event: UnsequencedAgentEvent): boolean {
+    const id = String(event.id);
+    const args = Array.isArray(event.args) ? event.args : [];
+    if (this.host.autoApproveExtension()) {
+      // Only tool approvals and the “Allow tool: <name>” confirmation are covered.
+      // Other extension prompts, including login/editor confirmations, remain interactive.
+      const value = event.method === "approve" ? "once"
+        : event.method === "confirm" && typeof args[0] === "string" && /^allow tool\s*:/i.test(args[0]) ? true
+        : undefined;
+      if (value !== undefined) {
+        this.forgetPendingUiRequest(id);
+        this.proc.sendFrame({ type: "ui_response", id: event.id, value });
+        return true;
       }
-      this.pendingUiRequests.set(id, event);
-      return false;
     }
+    // Pending until answered or ended (replayed to newly-attached SSE listeners so dialogs survive reconnects).
+    this.forgetPendingUiRequest(id);
+    // The dialog options are the last positional argument: (questions|html|prompt, options) or (title, x, options).
+    const options = args[event.method === "askDialog" || event.method === "formDialog" || event.method === "approve" ? 1 : 2];
+    const timeout = isRecord(options) && typeof options.timeout === "number" ? options.timeout : undefined;
+    if (timeout && timeout > 0) {
+      event.expiresAt = Date.now() + timeout;
+      const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+      timer.unref?.();
+      this.uiExpiryTimers.set(id, timer);
+    }
+    this.pendingUiRequests.set(id, event);
+    return false;
+  }
+
+  /** Keeps the extension status/widget state a newly attached tab is sent. */
+  private trackPresentation(event: UnsequencedAgentEvent): void {
+    const method = event.method;
     if (method === "setStatus") {
       const key = event.statusKey as string;
       const text = event.statusText as string | undefined;
       if (text === undefined) this.extensionStatuses.delete(key);
       else this.extensionStatuses.set(key, text);
-      return false;
-    }
-    if (method === "setWidget") {
+    } else if (method === "setWidget") {
       const key = event.widgetKey as string;
       const lines = event.widgetLines as string[] | undefined;
       if (lines === undefined) {
@@ -1552,7 +1576,6 @@ export class AgentSessionWrapper {
         });
       }
     }
-    return false;
   }
 
   /**
@@ -1939,44 +1962,65 @@ export class AgentSessionWrapper {
    * with host_tool_result — never via pendingHostTools, so a later tab
    * disconnect cannot settle it as a UI call.
    */
-  private async answerServerAgentTool(event: UnsequencedAgentEvent): Promise<void> {
+  private async answerServerAgentTool(event: UnsequencedAgentEvent, sourceProc: RpcProcess): Promise<void> {
     const id = typeof event.id === "string" ? event.id : "";
     const toolName = typeof event.toolName === "string" ? event.toolName : "";
     if (!id) return;
+    const proc = sourceProc;
     const sendResult = (text: string, isError = false) => {
-      this.proc.sendFrame({
+      proc.sendFrame({
         type: "host_tool_result",
         id,
         isError,
         result: { content: [{ type: "text", text }] },
       });
     };
+    if (!this._alive || sourceProc === this.restartingProc) {
+      sendResult(this._alive ? RESTARTING_MESSAGE : "Session is no longer running", true);
+      return;
+    }
+    const sourceSessionId = this.sessionId;
+    const sourceSessionFile = this._sessionFile;
+    const cancel = new AbortController();
+    const sendToolResult = (text: string, isError = false) => {
+      if (cancel.signal.aborted && (this.sessionId !== sourceSessionId || this._sessionFile !== sourceSessionFile)) return;
+      sendResult(text, isError);
+    };
+    this.serverToolCalls.set(id, cancel);
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
+      const getSessionId = () => this.sessionId;
       const context: AgentToolContext = {
-        sourceSessionId: this.sessionId,
+        get sourceSessionId() { return getSessionId(); },
         sourceRequestId: id,
         sourceCwd: this.cwd,
         sourceHostId: this.host.id,
         enabled: loadWebServerSettings().agentToolsEnabled,
         guard: getAgentToolGuard(),
-        confirm: (title) => this.confirmFromServer(title),
+        confirm: (title) => this.confirmFromServer(title, cancel.signal),
+        signal: cancel.signal,
       };
       if (this.replaying && toolName === "new_session" && (
         args.shareWorkspace === true || args.host != null || !poolProjectBindings(loadPools()).get(this.host.id)?.size
       )) throw new Error(AGENT_TOOL_UNKNOWN_OUTCOME);
       const result = await executeAgentTool(toolName, args, createAgentToolOps(context, this.replaying), context);
-      sendResult(typeof result === "string" ? result : JSON.stringify(result));
+      sendToolResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
       if (error instanceof PoolStartError) {
-        sendResult(JSON.stringify({
+        sendToolResult(JSON.stringify({
           error: error.message.slice(0, 1024), code: error.code.slice(0, 128),
           sessionId: error.sessionId, hostId: error.hostId, cwd: error.cwd, delivery: error.delivery,
         }), true);
       } else {
-        sendResult(error instanceof Error ? error.message : String(error), true);
+        sendToolResult(error instanceof Error ? error.message : String(error), true);
       }
+    } finally {
+      if (this.serverToolCalls.get(id) === cancel) this.serverToolCalls.delete(id);
     }
+  }
+
+  private abortServerToolCalls(): void {
+    for (const controller of this.serverToolCalls.values()) controller.abort();
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
@@ -2125,7 +2169,6 @@ export class AgentSessionWrapper {
     if (wasRunning && !this.isRunning()) {
       notifyRunningChange();
     }
-    const skillDiagnostics = parseSkillDiagnosticsSnapshot(state.skillDiagnostics);
     return {
       sessionId: state.sessionId,
       sessionFile: state.sessionFile ?? "",
@@ -2167,26 +2210,14 @@ export class AgentSessionWrapper {
       slowModeEnabled: state.slowModeEnabled ?? false,
       slowModeScope: state.slowModeScope,
       usageLimit: state.usageLimit,
-      ...(skillDiagnostics ? { skillDiagnostics } : {}),
       todoPhases: state.todoPhases ?? [],
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
     };
   }
 
-  private requireSkillDiagnostics(value: unknown): SkillDiagnosticsSnapshot {
-    const snapshot = parseSkillDiagnosticsSnapshot(value);
-    if (!snapshot) {
-      throw new WebRpcError(
-        "Skill diagnostics are unavailable for this OMP session",
-        "skill_diagnostics_unsupported",
-      );
-    }
-    return snapshot;
-  }
-
-  private async getStateWithTimeout(): Promise<RpcSessionState> {
-    return this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+  private async getStateWithTimeout(timeoutMs = GET_STATE_TIMEOUT_MS): Promise<RpcSessionState> {
+    return this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, timeoutMs);
   }
 
   /** After branch/new_session/switch_session the child is on a different
@@ -2219,9 +2250,8 @@ export class AgentSessionWrapper {
     const sessionId = this._sessionId;
     const sessionFile = this._sessionFile;
     let persistenceError: Error | null = null;
-    // Keep observing through the authoritative post-edit state query as well
-    // as the helper's reply/ack exchange. The ordinary notice path still emits
-    // the native error to every observer.
+    // Keep observing through the authoritative post-edit state query too.
+    // The ordinary notice path still emits the native error to every observer.
     const unsubscribe = proc.onFrame((frame) => {
       if (frame.type === "notice" && frame.source === "session-persistence" && frame.level === "error") {
         persistenceError ??= new Error(typeof frame.message === "string" ? frame.message : "OMP could not persist the history edit");
@@ -2252,7 +2282,11 @@ export class AgentSessionWrapper {
         throw new WebRpcError("Wait for the current run to finish before editing", "session_busy");
       }
 
-      const result = await editSessionHistory(proc, entryId, sessionId);
+      const result = await proc.sendCommand<SessionEditResult>({ type: "edit_message", entryId }, EDIT_TIMEOUT_MS);
+      if (!isRecord(result) || typeof result.sessionId !== "string" || !result.sessionId.trim() || typeof result.cancelled !== "boolean"
+        || (result.leafId !== null && typeof result.leafId !== "string")) {
+        throw new Error("OMP returned an invalid history edit result");
+      }
       const after = await this.getStateWithTimeout();
       if (persistenceError) throw persistenceError;
       const unchanged = after.sessionId === sessionId && after.sessionFile === sessionFile;
@@ -2285,11 +2319,6 @@ export class AgentSessionWrapper {
         if (persistenceError) throw persistenceError;
         throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
       }
-      if (error instanceof SessionEditAgentInvocationError && !error.agentStarted) {
-        // Native /retry can acknowledge before its deferred agent_start. There
-        // is no observed run to own that gap: stop it before releasing Edit.
-        await this.destroyAndWait("session-unresponsive", true);
-      }
       throw persistenceError ?? error;
     } finally {
       unsubscribe();
@@ -2309,6 +2338,8 @@ export class AgentSessionWrapper {
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
+    this.restartingProc = old;
+    this.abortServerToolCalls();
     let resumable: boolean;
     try {
       // Asked before touching the live child: a remote host can be offline,
@@ -2316,6 +2347,7 @@ export class AgentSessionWrapper {
       resumable = !!sessionFile && await this.host.sessionFileExists(sessionFile);
     } catch (error) {
       this.restarting = false;
+      this.restartingProc = null;
       throw error;
     }
     this.resetStream();
@@ -2366,7 +2398,7 @@ export class AgentSessionWrapper {
       const proc = new RpcProcess({
         cwd: spawned.cwd,
         transport: spawned.transport,
-        ...(spawned.transport.hostOwnedLifecycle ? { adopted: { protocolVersion: 2 as const } } : {}),
+        ...(spawned.transport.hostOwnedLifecycle ? { adopted: true as const } : {}),
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -2381,20 +2413,18 @@ export class AgentSessionWrapper {
       this.deliveredCallbacks.clear();
       this.messageCommandGeneration += 1;
       this.confirmedMessageCommandGeneration = this.messageCommandGeneration;
-      this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
+      this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame, proc));
       this.watchResync(proc);
       this.reportInterest();
       try {
         if (this.hostOwnedLifecycle) {
           await this.adopt([...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])]);
         } else {
-          const ready = await proc.waitReady(READY_TIMEOUT_MS);
-          await proc.negotiateProtocol(ready);
+          await proc.waitReady(READY_TIMEOUT_MS);
           await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
-          await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
           await this.enableDeltaUpdates(proc);
         }
-        const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+        const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, STARTUP_COMMAND_TIMEOUT_MS);
         this.applyIdentity(state);
         // Same fresh-spawn guard as startRpcSession: a sessionless wrapper
         // restarts bare, and omp's startup resume handling could land it on the
@@ -2426,6 +2456,7 @@ export class AgentSessionWrapper {
         throw error;
       }
     } finally {
+      this.restartingProc = null;
       this.restarting = false;
     }
     notifyRunningChange();
@@ -2718,22 +2749,6 @@ export class AgentSessionWrapper {
         }
       }
 
-      case "get_skill_diagnostics": {
-        const result = await this.proc.sendCommand<unknown>({ type: "get_skill_diagnostics" }, GET_STATE_TIMEOUT_MS);
-        return this.requireSkillDiagnostics(result);
-      }
-
-      case "set_skill_startup_diagnostics": {
-        if (typeof command.enabled !== "boolean") {
-          throw new WebRpcError("enabled must be a boolean", "invalid_skill_startup_diagnostics");
-        }
-        const result = await this.proc.sendCommand<unknown>({
-          type: "set_skill_startup_diagnostics",
-          enabled: command.enabled,
-        }, GET_STATE_TIMEOUT_MS);
-        return this.requireSkillDiagnostics(result);
-      }
-
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
         const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId }, preserveUnknownDelivery ? PROMPT_ACK_TIMEOUT_MS : undefined);
@@ -2834,10 +2849,7 @@ export class AgentSessionWrapper {
       }
 
       case "get_commands": {
-        const data = await this.proc.sendCommand<{ commands: RpcAvailableSlashCommand[] }>({
-          type: "get_available_commands",
-        });
-        return { ...data, commands: data.commands.filter((command) => command.name !== SESSION_EDIT_COMMAND) };
+        return this.proc.sendCommand<{ commands: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" });
       }
 
       case "reload": {
@@ -2845,39 +2857,44 @@ export class AgentSessionWrapper {
         return { success: true };
       }
 
-      case "extension_ui_response": {
-        const { id, ...rest } = command as { id: string; [key: string]: unknown };
-        const pendingAsk = this.pendingUiRequests.get(id)?.method === "ask";
-        // A pending ask accepts only its answers or a cancel; anything else would
-        // drop it from reconnect replay while omp rejects the payload.
-        if (("answers" in rest || pendingAsk) && !isAskAnswers(rest.answers) && !(pendingAsk && rest.cancelled === true)) {
-          throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
+      case "ui_response": {
+        const { id, value } = command;
+        if (typeof id !== "number" && typeof id !== "string") throw new WebRpcError("Invalid dialog id", "invalid_ui_response");
+        const key = String(id);
+        const serverRequest = this.serverUiRequests.get(key);
+        // The runner numbers its dialogs and ignores any other id; only ompweb's own confirms keep string ids.
+        const runnerId = serverRequest ? undefined : /^\d+$/.test(key) ? Number(key) : NaN;
+        if (runnerId !== undefined && !Number.isSafeInteger(runnerId)) throw new WebRpcError("Invalid dialog id", "invalid_ui_response");
+        const method = this.pendingUiRequests.get(key)?.method;
+        // A malformed answer would drop the dialog from reconnect replay while omp rejects it.
+        if (value !== undefined && (method === "askDialog" || method === "formDialog") && !isRecord(value)) {
+          throw new WebRpcError("Invalid dialog answer", "invalid_ui_response");
         }
-        const wasPending = this.pendingUiRequests.has(id);
-        this.forgetPendingUiRequest(id);
-        const serverRequest = this.serverUiRequests.get(id);
+        if (value !== undefined && method === "formDialog" && isRecord(value) && !isRecord(value.data)) {
+          throw new WebRpcError("Invalid form dialog answer", "invalid_ui_response");
+        }
+        const wasPending = this.pendingUiRequests.has(key);
+        this.forgetPendingUiRequest(key);
         if (serverRequest) {
-          this.serverUiRequests.delete(id);
-          serverRequest(rest.confirmed === true);
+          this.serverUiRequests.delete(key);
+          serverRequest(value === true);
         } else {
-          this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
+          this.proc.sendFrame({ type: "ui_response", id: runnerId, value });
         }
-        // omp sends no cancel for an answered dialog; other tabs on this
+        // omp sends no ui_end for a dialog the host answered; other tabs on this
         // session would keep showing it, so settle it for them here.
-        if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+        if (wasPending) this.emit({ type: "ui_end", id });
         return null;
       }
+
+      case "ui_input":
+        this.proc.sendFrame({ type: "ui_input", id: command.id, data: command.data });
+        return null;
 
       case "bash": {
         const proc = this.proc;
         if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
           throw new Error("excludeFromContext must be a boolean");
-        }
-        // OMP >= 18.18.1 advertises this on the actual child; a host's installed
-        // version cannot prove that an older, still-running child supports it.
-        if (command.excludeFromContext === true &&
-            (await proc.waitReady(READY_TIMEOUT_MS)).supportsBashExcludeFromContext !== true) {
-          throw new WebRpcError(BASH_EXCLUDE_MESSAGE, "bash_exclude_unsupported");
         }
         // A turn may be running: omp runs the command beside it and, as its
         // terminal does, records the result only when the next prompt starts.
@@ -3041,6 +3058,7 @@ export class AgentSessionWrapper {
     if (this.destroyPromise) return untilHostDown(this.host, this.destroyPromise);
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
+    this.abortServerToolCalls();
     this._alive = false;
     this.reportInterest();
     this.deliveredCallbacks.clear();
@@ -3109,6 +3127,8 @@ export interface RunningRpcSession {
   cwd: string;
   /** Absent on this machine, as on `SessionInfo`: the sidebar groups a placeholder under it. */
   hostId?: string;
+  /** A blocking dialog (ask, confirm, input, …) waits for the user. */
+  awaitingInput?: true;
 }
 
 export interface RunningSessionUpdate {
@@ -3127,6 +3147,7 @@ declare global {
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
   var __ompFrameTaps: Set<(wrapper: AgentSessionWrapper, event: AgentEvent) => void> | undefined;
   var __ompSessionMoveListeners: Set<(from: string, to: string) => void> | undefined;
+  var __ompAskClosedListeners: Set<(sessionId: string) => void> | undefined;
   var __ompNativeWrites: WeakSet<object> | undefined;
 }
 
@@ -3197,7 +3218,12 @@ export function getRunningRpcSessions(): RunningRpcSession[] {
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) {
       const id = session.sessionId || sessionId;
-      map.set(id, { id, cwd: session.cwd, ...(session.host.id === LOCAL_HOST_ID ? {} : { hostId: session.host.id }) });
+      map.set(id, {
+        id,
+        cwd: session.cwd,
+        ...(session.host.id === LOCAL_HOST_ID ? {} : { hostId: session.host.id }),
+        ...(session.isAwaitingInput() ? { awaitingInput: true as const } : {}),
+      });
     }
   }
   return [...map.values()];
@@ -3248,6 +3274,15 @@ export function tapSessionFrames(tap: (wrapper: AgentSessionWrapper, event: Agen
   const taps = (globalThis.__ompFrameTaps ??= new Set());
   taps.add(tap);
   return () => { taps.delete(tap); };
+}
+
+const isAskRequest = (event: UnsequencedAgentEvent | undefined): boolean => event?.method === "askDialog" || event?.method === "formDialog";
+
+/** A session's last open ask closed (answered, cancelled, expired or its child gone): the outbox's held steers may go. */
+export function onAskClosed(listener: (sessionId: string) => void): () => void {
+  const listeners = (globalThis.__ompAskClosedListeners ??= new Set());
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 /** Confirmed ownership moves only, after registry aliases exist and before observers see the new identity. */
@@ -3357,6 +3392,9 @@ function getAgentToolGuard(): AgentToolGuard {
   return globalThis.__ompAgentToolGuard;
 }
 
+/** omp's command for each agent-tool delivery; the `Record` makes a new delivery fail to compile until it is mapped. */
+const DELIVERY_COMMAND: Record<AgentToolDeliverInput["delivery"], string> = { prompt: "prompt", steer: "steer", followUp: "follow_up" };
+
 /**
  * Real session operations behind lib/agent-tools executeAgentTool.
  * Reuses the existing spawn/resume and message-send paths (startRpcSession,
@@ -3370,20 +3408,22 @@ function getAgentToolGuard(): AgentToolGuard {
  * reads the turn's final text with get_last_assistant_text.
  */
 function createAgentToolOps(source: AgentToolContext, replaying: boolean): AgentToolSessionOps {
+  const hosts = (): AgentToolHost[] => {
+    const local = getHost(LOCAL_HOST_ID);
+    return [
+      { id: local.id, label: local.label, online: isLinkUp(local.status()), allowAgentStart: true },
+      ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
+    ];
+  };
   return {
+    github: createGithubToolOps(hosts),
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
       const sessions = await listSessionsAllHosts();
       return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id), hostId: s.hostId ?? LOCAL_HOST_ID }));
     },
 
-    listHosts() {
-      const local = getHost(LOCAL_HOST_ID);
-      return [
-        { id: local.id, label: local.label, online: isLinkUp(local.status()), allowAgentStart: true },
-        ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
-      ];
-    },
+    listHosts: hosts,
 
     async createSession(input, authorize) {
       const authorizeHost = (host: Host) => {
@@ -3453,6 +3493,8 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
         cold = true;
       }
       const target = wrapper;
+      // A steer would interrupt the target's open ask: it goes as a follow-up, which the result reports.
+      let delivery = input.delivery;
       const send = async () => {
         const wasRunning = target.isRunning();
         if (input.delivery === "prompt" && wasRunning) {
@@ -3461,21 +3503,22 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
         if (input.delivery === "steer" && !wasRunning) {
           throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
         }
-        const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
+        if (delivery === "steer" && target.isAwaitingAsk()) delivery = "followUp";
+        const terminalEndsNeeded = delivery === "followUp" && wasRunning ? 2 : 1;
         const waiter = input.wait ? target.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
-        await target.send({ type: input.delivery, message: input.message });
+        await target.send({ type: DELIVERY_COMMAND[delivery], message: input.message });
         return { waiter }; // Boxed: the lease ends at delivery, not at the turn's end.
       };
       const { waiter } = cold ? await wrapper.withPendingCommand(send, true) : await send();
       if (!input.wait || !waiter) {
-        return { accepted: true, targetSessionId: input.sessionId, delivery: input.delivery, waited: false, responseText: null };
+        return { accepted: true, targetSessionId: input.sessionId, delivery, waited: false, responseText: null };
       }
       await waiter;
       const last = (await wrapper.send({ type: "get_last_assistant_text" })) as { text?: unknown } | null;
       return {
         accepted: true,
         targetSessionId: input.sessionId,
-        delivery: input.delivery,
+        delivery,
         waited: true,
         responseText: typeof last?.text === "string" ? last.text : null,
       };
@@ -3642,7 +3685,7 @@ export async function startRpcSession(
     const proc = new RpcProcess({
       cwd: spawned.cwd,
       transport: spawned.transport,
-      ...(spawned.transport.hostOwnedLifecycle ? { adopted: { protocolVersion: 2 as const } } : {}),
+      ...(spawned.transport.hostOwnedLifecycle ? { adopted: true as const } : {}),
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
@@ -3778,7 +3821,7 @@ export async function adoptRpcSession({ host, transport, sessionId, cwd, replay,
     throw new Error(`Session ${sessionId || creationId} is already started on this server`);
   }
   const holder: { wrapper?: AgentSessionWrapper } = {};
-  const proc = new RpcProcess({ cwd, transport, adopted: { protocolVersion: 2 }, onExit: (info) => holder.wrapper?.handleProcessExit(info, proc) });
+  const proc = new RpcProcess({ cwd, transport, adopted: true, onExit: (info) => holder.wrapper?.handleProcessExit(info, proc) });
   // Legacy adoption cannot recover spawn-time flags; a shared daemon returns the actual launch metadata.
   const created = new AgentSessionWrapper(proc, cwd, cwd, advisorSpawned ?? false, sessionId, DISCONNECT_DESTROY_MS, host, launchAdvisor ?? false);
   holder.wrapper = created;

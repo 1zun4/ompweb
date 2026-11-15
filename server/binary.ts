@@ -5,6 +5,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import packageJson from "../package.json";
+import { releaseRepo } from "../lib/release-repo";
 import { formatAddressBanner, getAccessibleAddresses, getBrowserUrl, openInBrowser } from "../bin/network-addresses";
 import { runHashPasswordCommand } from "../bin/omp-web-hash-password";
 import { checkLaunchSecurity, parseLaunchOptions } from "../bin/omp-web-options";
@@ -15,13 +16,17 @@ import { runHostUpdateWorker } from "../lib/hosts/update-worker";
 // lib/omp/session-edit-extension.mjs in it to omp.
 process.env.OMP_WEB_PACKAGE_DIR ??= path.dirname(realpathSync(process.execPath));
 const root = process.env.OMP_WEB_PACKAGE_DIR;
-const SEE_README = "https://github.com/kahme247/ompweb#single-binary shows how to run `ompweb` and `ompweb host` as services instead.";
+const SEE_README = `https://github.com/${releaseRepo()}#single-binary shows how to run \`ompweb\` and \`ompweb host\` as services instead.`;
 
 const command = process.argv[2];
 if (command === "host-update-worker") {
   process.exit(await runHostUpdateWorker(process.argv[3] || ""));
 }
 if (command === "host") process.exit(await runHostCli(process.argv.slice(3)));
+// The host updater finds this command in a release by PREFLIGHT_MARKER before it runs it: an older ompweb starts the web server instead.
+if (command === "preflight") process.exit(await (await import("../lib/hosts/preflight")).runPreflight());
+// Updaters run it on a candidate before its preflight: the release archive has no runner (lib/omp/runner-fetch.ts).
+if (command === "fetch-omp") process.exit(await (await import("../lib/omp/runner-fetch")).runFetchOmp());
 if (command === "hash-password" || command === "hash_password") {
   process.exit(await runHashPasswordCommand().catch((error: unknown) => {
     console.error(`Could not hash the password: ${error instanceof Error ? error.message : String(error)}`);

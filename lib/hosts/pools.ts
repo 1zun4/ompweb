@@ -12,6 +12,8 @@ import type { CapacitySnapshot } from "./hub";
 export interface PoolHostSnapshot {
   status: HostStatus;
   linkProtocol: number;
+  /** False for a cluster member that is not on the master's configuration (`isHostConfigCurrent`); it is never chosen. */
+  configCurrent: boolean;
   capacity: CapacitySnapshot | null;
 }
 
@@ -67,7 +69,7 @@ function validLaunchConfig(value: unknown): boolean {
       && value.extraArgs.every((arg) => typeof arg === "string" && arg.length > 0 && arg.length <= 256 && !isReservedLaunchArg(arg))));
 }
 
-function validatePools(value: unknown): asserts value is HostPool[] {
+export function validatePools(value: unknown): asserts value is HostPool[] {
   if (!Array.isArray(value)) throw new Error("Invalid pools list");
   const poolIds = new Set<string>();
   for (const pool of value) {
@@ -180,7 +182,7 @@ export function selectPoolHost(
   for (const member of pool.members) {
     if (!member.provisioned || member.draining) continue;
     const report = snapshots.get(member.hostId);
-    if (!report || report.status !== "online" || !(report.linkProtocol >= 8) || !report.capacity) continue;
+    if (!report || report.status !== "online" || !report.capacity || !report.configCurrent) continue;
     const { sample, receivedAt } = report.capacity;
     if (!nonnegative(receivedAt) || receivedAt > now || now - receivedAt > 15_000) continue;
     const { effectiveCpus, load1, busyFraction, stealFraction, availableMemoryBytes, activeSessions } = sample;

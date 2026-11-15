@@ -14,7 +14,7 @@ import { setImmediate as nextTurn } from "timers/promises";
 import { promisify } from "util";
 import { comparableProjectPath } from "../comparable-path";
 import { mediaFilePath } from "../media-cache";
-import { resolveOmpBin, wrapWindowsScript } from "../omp/omp-cli";
+import { OMP_NOT_FOUND, resolveOmpBin, wrapWindowsScript } from "../omp/omp-cli";
 import { listArchivedSessionInfos, restoreArchivedSession, restoreFailureStatus } from "../omp/archive";
 import {
   archiveSessionFileWithArtifacts,
@@ -362,7 +362,7 @@ function isUsageReadRequest(value: unknown): value is UsageReadRequest {
 async function runOmpExport(filePath: string, outputPath: string): Promise<void> {
   const bin = resolveOmpBin();
   if (!bin) {
-    throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
+    throw new Error(OMP_NOT_FOUND);
   }
   const target = wrapWindowsScript(bin, ["--export", filePath, outputPath]);
   await execFileAsync(target.file, target.args, {
@@ -681,7 +681,7 @@ export const sessionOps: SessionOps = {
       return ok({ html: readFileSync(outputPath, "utf8"), fileName });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("omp binary not found")) return fail(500, "omp_not_found", message);
+      if (message.includes(OMP_NOT_FOUND)) return fail(500, "omp_not_found", message);
       throw error;
     } finally {
       rmSync(outputPath, { force: true });
