@@ -149,3 +149,25 @@ test("a background update that fails is shown above the report it could not repl
   await advance(2000);
   assert.deepEqual([requests.length, within(container).queryByRole("alert")], [3, null]);
 });
+
+test("a background update still on its way when Refresh is pressed does not replace the refreshed report", async (t) => {
+  const laptop = (state) => report({ hostBreakdown: [host("local", "", "current", null, 2), host("h1", "laptop", state, null, 1)] });
+  const requests = fakeUsage(t, laptop("syncing"), laptop("current"), laptop("syncing"));
+  const delivered = globalThis.fetch;
+  const late = Promise.withResolvers();
+  let calls = 0;
+  // The second call, the background update, answers only once the refresh has.
+  globalThis.fetch = (url, init) => (++calls === 2 ? late.promise.then(() => delivered(url, init)) : delivered(url, init));
+  const advance = mockTimers(t);
+  const { container } = render(createElement(UsageConfig));
+  await advance();
+  fireEvent.click(within(container).getByRole("button", { name: "HOST" }));
+  const laptopRow = () => container.querySelectorAll("tbody tr")[1].cells[0].textContent;
+
+  await advance(2000);
+  fireEvent.click(within(container).getByRole("button", { name: "Refresh usage data" }));
+  await advance();
+  late.resolve();
+  await advance();
+  assert.deepEqual([requests.length, laptopRow()], [3, "laptop"]);
+});

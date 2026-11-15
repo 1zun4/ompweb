@@ -369,6 +369,11 @@ export function storeHostUsage(
   })();
 }
 
+/** Mark every stored transcript of linked host `hostId` as read by no parser, so the next pull reads it again. */
+export function invalidateHostUsageStamps(db: Database, hostId: string): void {
+  db.prepare("UPDATE synced_files SET parser_version = NULL WHERE host_id = ?").run(hostId);
+}
+
 /** Record that linked host `hostId`'s stored rows matched its transcripts at `syncedAt`. */
 export function markHostSynced(db: Database, hostId: string, syncedAt: number): void {
   db.prepare("INSERT OR REPLACE INTO synced_hosts (host_id, synced_at) VALUES (?, ?)").run(hostId, syncedAt);

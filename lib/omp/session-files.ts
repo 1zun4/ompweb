@@ -1462,11 +1462,18 @@ export function deleteSessionFileWithArtifacts(filePath: string): void {
  * scratch space, which omp never writes transcripts to and which can hold
  * arbitrary trees (cloned repos, dependencies). Returns [] without an
  * artifacts directory. With `complete`, any other directory that cannot be
- * read throws instead of being left out.
+ * read throws instead of being left out, and an artifacts directory that is a
+ * symlink has no transcripts: what it points at lies outside the sessions tree.
  */
 export function listSessionArtifactTranscripts(sessionFile: string, complete = false): string[] {
   if (!sessionFile.endsWith(".jsonl")) return [];
   const root = sessionFile.slice(0, -".jsonl".length);
+  try {
+    if (!lstatSync(root).isDirectory()) return [];
+  } catch (error) {
+    if (complete && !isGone(error)) throw error;
+    return [];
+  }
   const transcripts: string[] = [];
   const pending = [root];
   for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {

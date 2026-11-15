@@ -56,10 +56,16 @@ export function UsageConfig() {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const chartSvgRef = useRef<SVGSVGElement | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
 
   const fetchUsage = useCallback(
     // `poll` refetches behind the page: no spinner, and an earlier failure stays up until an answer arrives.
-    async (mode: "load" | "refresh" | "poll" = "load", signal?: AbortSignal) => {
+    async (mode: "load" | "refresh" | "poll" = "load") => {
+      requestRef.current?.abort();
+      const controller = new AbortController();
+      requestRef.current = controller;
+      const { signal } = controller;
+
       if (mode === "refresh") setRefreshing(true);
       else if (mode === "load") setLoading(true);
       if (mode !== "poll") setError(null);
@@ -76,15 +82,16 @@ export function UsageConfig() {
           throw new Error(`Failed to fetch usage: ${res.statusText}`);
         }
         const data: UsageReport = await res.json();
+        if (signal.aborted) return;
         setReport(data);
         setError(null);
       } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") {
+        if (signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
           return;
         }
         setError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (mode !== "poll") {
+        if (!signal.aborted && mode !== "poll") {
           setLoading(false);
           setRefreshing(false);
         }
@@ -94,31 +101,30 @@ export function UsageConfig() {
   );
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetchUsage("load", controller.signal);
+    void fetchUsage("load");
     return () => {
-      controller.abort();
+      requestRef.current?.abort();
     };
   }, [fetchUsage]);
 
   // The server answers after 10 s at most and lets slower hosts finish behind the report.
   const hostsSyncing = report?.hostBreakdown?.some((host) => host.state === "syncing") ?? false;
   useEffect(() => {
-    if (!hostsSyncing) return;
-    const controller = new AbortController();
+    if (!hostsSyncing || loading || refreshing) return;
+    let cancelled = false;
     let timer: number | undefined;
     const poll = () => {
       timer = window.setTimeout(async () => {
-        await fetchUsage("poll", controller.signal);
-        if (!controller.signal.aborted) poll();
+        await fetchUsage("poll");
+        if (!cancelled) poll();
       }, HOST_SYNC_POLL_MS);
     };
     poll();
     return () => {
-      controller.abort();
+      cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [hostsSyncing, fetchUsage]);
+  }, [hostsSyncing, loading, refreshing, fetchUsage]);
 
   // Date range subtitle calculation
   const dateRangeSubtitle = useMemo(() => {

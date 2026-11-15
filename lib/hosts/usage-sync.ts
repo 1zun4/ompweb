@@ -1,12 +1,12 @@
 // Usage of linked hosts: each host's daemon reads its own transcripts, main keeps a copy in usage.db so a host that
 // goes offline keeps its last numbers. Pulled only on /api/usage requests. No `next/*` or `@/` imports.
 import type { Database } from "bun:sqlite";
-import { hostSyncTimes, isUpToDate, markHostSynced, pruneHostUsage, storedStamps, storeHostUsage } from "../usage-db";
+import { hostSyncTimes, invalidateHostUsageStamps, isUpToDate, markHostSynced, pruneHostUsage, storedStamps, storeHostUsage } from "../usage-db";
 import type { HostUsageStatus, HostUsageSyncState, UsageReadRequest, UsageTranscriptRecords } from "../usage-types";
 import { isLinkUp, type Host } from "./host";
-import { getHost, listHosts, onHostHello } from "./hub";
+import { getHost, onHostHello } from "./hub";
 import { HostOpError } from "./link-protocol";
-import { readHosts } from "./registry";
+import { LOCAL_HOST_ID, readHosts } from "./registry";
 
 /** `ttlMs`: a host pulled this recently is not asked again; `waitMs`: how long a report waits for its pulls. */
 export const usageSyncTimings = { ttlMs: 30_000, waitMs: 10_000 };
@@ -65,19 +65,22 @@ function nextBatch(queue: UsageReadRequest[]): UsageReadRequest[] {
 }
 
 /** Bring `db`'s copy of `host`'s usage up to date: read what is new or changed, drop what the host no longer has.
- * `refresh` reads every transcript again, so the host's current prices apply to all of them. */
+ * A refresh (`refresh`, or one an earlier pull did not finish) reads every transcript again, so the host's current
+ * prices apply to all of them. */
 async function syncHostUsage(host: Host, db: Database, refresh: boolean): Promise<void> {
-  const index = await host.sessionOps.listUsageTranscripts(refresh);
+  const unlisted = storedStamps(db, host.id);
+  // A refresh clears the stored parser versions first (`invalidateHostUsageStamps`); any left cleared is still pending.
+  const repricing = refresh || [...unlisted.values()].some((stamp) => stamp.parserVersion === null);
+  const index = await host.sessionOps.listUsageTranscripts(repricing);
   if (!index.ok) throw new HostOpError(index.status, index.code, index.error);
   const { parserVersion, sessions } = index.value;
-  const unlisted = storedStamps(db, host.id);
   const queue: UsageReadRequest[] = [];
   for (const { session, transcripts } of sessions) {
     const paths: string[] = [];
     for (const stamp of transcripts) {
       const upToDate = isUpToDate(unlisted.get(stamp.path), stamp, parserVersion);
       unlisted.delete(stamp.path);
-      if (refresh || !upToDate) paths.push(stamp.path);
+      if (!upToDate) paths.push(stamp.path);
     }
     if (paths.length > 0) queue.push({ session, paths });
   }
@@ -141,6 +144,8 @@ async function syncHostUsage(host: Host, db: Database, refresh: boolean): Promis
 async function pullHostUsage(host: Host, db: Database, refresh: boolean): Promise<void> {
   const pulls = pullsOf(host.id);
   while (pulls.running) await pulls.running;
+  // Kept in the database, so a refresh that fails or is cut off by a restart still reprices every transcript later.
+  if (refresh) invalidateHostUsageStamps(db, host.id);
   if (!isLinkUp(host.status())) return;
   if (!refresh && Date.now() - pulls.pulledAt < usageSyncTimings.ttlMs) return;
   pulls.running = syncHostUsage(host, db, refresh).then(() => {
@@ -171,22 +176,17 @@ function syncState(host: Host, pulls: HostPulls): HostUsageSyncState {
 /** Pull every linked host's usage, waiting at most `usageSyncTimings.waitMs` (slower pulls finish in the background),
  * and drop what is stored for hosts no longer registered. Returns the linked hosts by label. */
 export async function pullAllHostUsage(db: Database, refresh: boolean): Promise<HostUsageStatus[]> {
-  let registered: string[] | null = null;
-  try {
-    registered = readHosts().map((host) => host.id);
-  } catch {
-    // An unreadable registry cannot tell a revoked host from a kept one.
-  }
-  if (registered) {
-    pruneHostUsage(db, registered);
-    for (const hostId of globalThis.__ompHostUsagePulls?.keys() ?? []) {
-      if (!registered.includes(hostId)) globalThis.__ompHostUsagePulls!.delete(hostId);
-    }
+  // An unreadable registry throws before pruning or building a report with missing hosts.
+  const registered = readHosts()
+    .filter((host) => host.id !== LOCAL_HOST_ID)
+    .sort((a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase()) || a.id.localeCompare(b.id));
+  const registeredIds = registered.map((host) => host.id);
+  pruneHostUsage(db, registeredIds);
+  for (const hostId of globalThis.__ompHostUsagePulls?.keys() ?? []) {
+    if (!registeredIds.includes(hostId)) globalThis.__ompHostUsagePulls!.delete(hostId);
   }
 
-  const hosts = listHosts()
-    .sort((a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase()) || a.id.localeCompare(b.id))
-    .flatMap((row) => getHost(row.id) ?? []);
+  const hosts = registered.flatMap((row) => getHost(row.id) ?? []);
   const waited = Promise.withResolvers<void>();
   const timer = setTimeout(waited.resolve, usageSyncTimings.waitMs);
   timer.unref();
