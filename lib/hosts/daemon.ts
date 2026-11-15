@@ -406,7 +406,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     try {
       const result = await runOp(link, op, args);
       if (op === "open" && isRecord(result) && typeof result.ch === "string") opened = result.ch;
-      const media = (op === "readMedia" || op === "readFileChunk") && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
+      const media = (op === "readMedia" || op === "readFileChunk" || op === "readSessionPack") && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
       if (media && media.byteLength > LINK_LIMITS.blobBytes) throw new HostOpError(413, "result_too_large", "The result is too large for the host link");
       link.result(id, result, { session, key: opened, media });
       if (opened) { channelsChanged(opened); channels.release(link, opened); }
@@ -457,6 +457,16 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         if (!(isRecord(result) && result.ok === false)) sessionsChanged();
         return result;
       }
+      // omp writes a live session's file: its process stops before the file is packed or retired.
+      case "packSession":
+      case "finishSessionMove": {
+        if (typeof args.id !== "string") throw new HostOpError(400, "invalid_request", "Invalid session id");
+        const result = await channels.mutateSession<unknown>(args.id, (id) => op === "packSession"
+          ? sessionOps.packSession(id)
+          : sessionOps.finishSessionMove(id, args.transfer as string, args.to as string));
+        if (op === "finishSessionMove" && !(isRecord(result) && result.ok === false)) sessionsChanged();
+        return result;
+      }
       case "sessionFileExists": return localHost.sessionFileExists(sessionsPath(args.path));
       case "invalidateSessionLists": invalidateWorkspaceRoots(); localHost.invalidateSessionLists(args.path === undefined ? undefined : sessionsPath(args.path)); sessionsChanged(); return;
       case "checkUpdates": {
@@ -503,7 +513,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map(name => args[name]));
         if (op === "addProject" || op === "updateProject" || op === "hideProject") invalidateWorkspaceRoots();
-        if (["renameSessionFile", "deleteSession", "archiveSession", "restoreArchive"].includes(op) && !(isRecord(result) && result.ok === false)) sessionsChanged();
+        if (["renameSessionFile", "deleteSession", "archiveSession", "restoreArchive", "unpackSession"].includes(op) && !(isRecord(result) && result.ok === false)) sessionsChanged();
         return result;
       }
     }

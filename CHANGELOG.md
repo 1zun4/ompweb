@@ -9,6 +9,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ### Added
 
 - **Usage includes linked hosts.** Settings → Usage now counts the tokens and cost of sessions on every linked host, not only this machine. Each host's daemon reads its own transcripts; the web server keeps a copy, so a host that goes offline keeps its last numbers. A new **Host** breakdown shows each machine's share and when an offline host last synced, and project rows name their host. A host that is still syncing fills in on its own. Refresh reads every host's sessions again, with the prices in that host's `models.yml`. A host on an older ompweb is listed as needing an update.
+- **Move sessions by drag and drop.** Drag a session onto another workspace in the sidebar, on the same host or another one. The session is told where it came from: host, working directory, home directory and operating system. A copy left on another host is archived there.
 
 ### Fixed
 

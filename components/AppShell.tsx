@@ -1321,7 +1321,8 @@ export function AppShell({ appName }: { appName: string }) {
       setSidebarOpen(false);
       requestAnimationFrame(() => chatInputRef.current?.focus());
     }
-    if (!isRestore && selectedSession && sameSessionTarget(session, selectedSession)) return;
+    // A session moved to another workspace or host keeps its id but is opened again there.
+    if (!isRestore && selectedSession && sameSessionTarget(session, selectedSession) && session.cwd === selectedSession.cwd) return;
     setNewSessionCwd(null);
     setNewSessionPoolProject(null);
     setSelectedSession(session);
