@@ -563,7 +563,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     const onStorage = (event: StorageEvent) => {
       if (event.key !== null && event.key !== UNREAD_SESSIONS_STORAGE_KEY) return;
       const stored = loadUnreadSessionIds();
-      if (selectedSessionId) stored.delete(selectedSessionId);
+      // Write the drop back here: when this tab's set already equals the rest,
+      // no state change would reach the persistence effect.
+      if (selectedSessionId && stored.delete(selectedSessionId)) saveUnreadSessionIds(stored);
       setUnreadSessionIds((prev) => (prev.size === stored.size && [...stored].every((id) => prev.has(id)) ? prev : stored));
     };
     window.addEventListener("storage", onStorage);

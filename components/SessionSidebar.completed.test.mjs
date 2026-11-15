@@ -144,6 +144,15 @@ test("a check adopted from another tab skips the session open in this tab", asyn
   assert.deepEqual(JSON.parse(localStorage.getItem(UNREAD_KEY)), ["s-bg"], "the open session is written back as seen");
 });
 
+test("a check another tab writes for the session open here alone is written back as seen", async () => {
+  await mount({ selected: "s-open" });
+  // This tab's set is empty, so dropping the open session changes no state here.
+  localStorage.setItem(UNREAD_KEY, JSON.stringify(["s-open"]));
+  act(() => { window.dispatchEvent(new window.StorageEvent("storage", { key: UNREAD_KEY, newValue: '["s-open"]' })); });
+  assert.equal(hasCheck("Open task"), false);
+  assert.equal(localStorage.getItem(UNREAD_KEY), null, "the other tab is told the open session is seen");
+});
+
 test("a nested child's check updates when only the child becomes unread", async () => {
   sessions = [...SESSIONS, { ...session("s-child", "Child task", 0), parentSessionId: "s-bg" }];
   await mount();
