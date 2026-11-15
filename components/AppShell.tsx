@@ -1226,7 +1226,8 @@ export function AppShell({ appName }: { appName: string }) {
       setSidebarOpen(false);
       requestAnimationFrame(() => chatInputRef.current?.focus());
     }
-    if (!isRestore && session.id === selectedSession?.id) return;
+    // A session moved to another workspace or host keeps its id but is opened again there.
+    if (!isRestore && session.id === selectedSession?.id && session.cwd === selectedSession.cwd && remoteHostId(session.hostId) === remoteHostId(selectedSession.hostId)) return;
     setNewSessionCwd(null);
     setNewSessionPoolProject(null);
     setSelectedSession(session);
@@ -1246,7 +1247,7 @@ export function AppShell({ appName }: { appName: string }) {
     if (!isRestore) {
       router.replace(`?session=${encodeURIComponent(session.id)}`);
     }
-  }, [router, isMobile, selectedSession?.id]);
+  }, [router, isMobile, selectedSession?.id, selectedSession?.cwd, selectedSession?.hostId]);
 
   const handleNewSession = useCallback((creationId: string, cwd: string | null, hostId?: string, project?: ManagedProject, initialization?: string) => {
     setSettingsTab(null);
