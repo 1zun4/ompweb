@@ -21,19 +21,6 @@ const COLLAPSED_STORAGE_KEY = "omp-web:provider-usage-collapsed";
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
-/** The highest window of any account still in use, for the header. */
-export function usageSummary(accounts: readonly ProviderUsageAccount[]): { percent: number; window: string } | null {
-  let best: { percent: number; window: string } | null = null;
-  for (const account of accounts) {
-    if (account.paused) continue;
-    for (const { short, key } of WINDOWS) {
-      const window = account[key];
-      if (window && (best === null || window.percent > best.percent)) best = { percent: Math.round(window.percent), window: short };
-    }
-  }
-  return best;
-}
-
 /** Usage tone against the account's own limit: red from 80% of it, as from 80% of the provider's cap. */
 function limitTone(percent: number, limit: number | undefined): string {
   return usageTone(limit ? (percent / limit) * 100 : percent);
@@ -221,8 +208,6 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
     }
   }, []);
 
-  const summary = usageSummary(accounts);
-
   const update = async (account: ProviderUsageAccount, label: string, change: AccountChange) => {
     setBusyKey(account.key);
     try {
@@ -286,15 +271,15 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
           <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {t("appShell.sectionProviderUsage")}
           </span>
-          <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: "var(--font-mono)", color: summary ? usageTone(summary.percent) : "var(--text-dim)", fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0 }}>
-            {loading && accounts.length === 0
-              ? t("appShell.providerUsageLoading")
-              : error
-                ? t("appShell.providerUsageUnavailable")
-                : summary
-                  ? t("providerUsage.highest", { percent: summary.percent, window: summary.window })
+          {(error || accounts.length === 0) && (
+            <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-dim)", fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0 }}>
+              {loading && accounts.length === 0
+                ? t("appShell.providerUsageLoading")
+                : error
+                  ? t("appShell.providerUsageUnavailable")
                   : t("appShell.providerUsageNoData")}
-          </span>
+            </span>
+          )}
         </button>
         <Tooltip content={t("sessionSidebar.refresh")} side="top">
           <SidebarIconButton

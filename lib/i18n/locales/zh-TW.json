@@ -284,7 +284,6 @@
   "appShell.providerUsageUnavailable": "無法取得供應商額度限制",
   "appShell.providerUsageNoData": "未回報供應商額度限制",
   "appShell.account": "帳戶 {number}",
-  "providerUsage.highest": "最高 {percent}% · {window}",
   "providerUsage.resets": "{value} 重設",
   "providerUsage.limitFor": "{account} 的用量上限",
   "providerUsage.limitDefault": "≤{percent}%（預設）",

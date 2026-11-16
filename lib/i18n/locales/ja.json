@@ -273,7 +273,6 @@
   "appShell.providerUsageUnavailable": "プロバイダー制限を取得できません",
   "appShell.providerUsageNoData": "プロバイダー制限の報告はありません",
   "appShell.account": "アカウント {number}",
-  "providerUsage.highest": "最大 {percent}% · {window}",
   "providerUsage.resets": "{value} でリセット",
   "providerUsage.limitFor": "{account} の使用量の上限",
   "providerUsage.limitDefault": "≤{percent}% (既定)",

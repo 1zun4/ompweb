@@ -284,7 +284,6 @@
   "appShell.providerUsageUnavailable": "Provider limits unavailable",
   "appShell.providerUsageNoData": "No provider limits reported",
   "appShell.account": "Account {number}",
-  "providerUsage.highest": "Highest {percent}% · {window}",
   "providerUsage.resets": "resets {value}",
   "providerUsage.limitFor": "Usage limit for {account}",
   "providerUsage.limitDefault": "≤{percent}% (default)",
