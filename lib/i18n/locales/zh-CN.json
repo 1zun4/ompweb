@@ -273,7 +273,6 @@
   "appShell.providerUsageUnavailable": "提供商限额不可用",
   "appShell.providerUsageNoData": "没有提供商限额报告",
   "appShell.account": "账户 {number}",
-  "providerUsage.highest": "最高 {percent}% · {window}",
   "providerUsage.resets": "{value} 后重置",
   "providerUsage.limitFor": "{account} 的用量上限",
   "providerUsage.limitDefault": "≤{percent}%（默认）",
