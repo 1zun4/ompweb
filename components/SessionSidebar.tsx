@@ -163,6 +163,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, [hosts, pools]);
   const selectedWorkspaceRef = useRef("");
   selectedWorkspaceRef.current = hostProjectKey(selectedHostId, selectedCwd ?? "");
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  selectedSessionIdRef.current = selectedSessionId;
+  const allSessionsRef = useRef(allSessions);
+  allSessionsRef.current = allSessions;
   // Host group headers only exist once a remote host is linked.
   const showHostGroups = hostList.some((host) => host.id !== LOCAL_HOST_ID);
   // The server renders no groups; collapse state is read after mount.
@@ -1474,15 +1478,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         return;
       }
       toast.success(t("sessionSidebar.moved", { name }), data.staleCopy ? t("sessionSidebar.moveStaleCopy", { error: data.staleCopy }) : undefined);
-      const moved = allSessions.find((session) => session.id === dragged.id);
-      if (moved && selectedSessionId === dragged.id) {
-        handleSelectSessionFromList({ ...moved, id: data.sessionId, hostId: data.hostId, cwd: data.cwd ?? project.path, projectRoot: data.projectRoot, projectKey: undefined, worktreeBranch: undefined });
+      const moved = allSessionsRef.current.find((session) => session.id === dragged.id);
+      if (moved && selectedSessionIdRef.current === dragged.id) {
+        handleSelectSessionFromList({ ...moved, id: data.sessionId, hostId: data.hostId, cwd: data.cwd ?? project.path, projectRoot: data.projectRoot, poolId: undefined, projectId: undefined, projectKey: undefined, worktreeBranch: undefined });
       }
       loadSessions();
     } catch (error) {
       toast.error(t("sessionSidebar.moveFailed"), error instanceof Error ? error.message : String(error));
     }
-  }, [allSessions, selectedSessionId, handleSelectSessionFromList, loadSessions, t]);
+  }, [handleSelectSessionFromList, loadSessions, t]);
 
   useEffect(() => {
     const selected = allSessions.find((session) => session.id === selectedSessionId);

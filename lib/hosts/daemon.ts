@@ -457,15 +457,45 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         if (!(isRecord(result) && result.ok === false)) sessionsChanged();
         return result;
       }
-      // omp writes a live session's file: its process stops before the file is packed or retired.
-      case "packSession":
+      // omp writes a live session's file: refuse a running session instead of stopping it; an idle child stops first.
+      case "packSession": {
+        if (typeof args.id !== "string") throw new HostOpError(400, "invalid_request", "Invalid session id");
+        return channels.mutateSession<unknown>(args.id, async (id) => {
+          const packed = await sessionOps.packSession(id);
+          if (packed.ok) channels.reserveMove(link, id, packed.value.transfer);
+          return packed;
+        }, { refuseRunning: true });
+      }
       case "finishSessionMove": {
         if (typeof args.id !== "string") throw new HostOpError(400, "invalid_request", "Invalid session id");
-        const result = await channels.mutateSession<unknown>(args.id, (id) => op === "packSession"
-          ? sessionOps.packSession(id)
-          : sessionOps.finishSessionMove(id, args.transfer as string, args.to as string));
-        if (op === "finishSessionMove" && !(isRecord(result) && result.ok === false)) sessionsChanged();
-        return result;
+        const transfer = typeof args.transfer === "string" ? args.transfer : "";
+        try {
+          const result = await channels.mutateSession<unknown>(
+            args.id,
+            (id) => sessionOps.finishSessionMove(id, args.transfer as string, args.to as string),
+            { refuseRunning: true, moveTransfer: transfer },
+          );
+          if (!(isRecord(result) && result.ok === false)) sessionsChanged();
+          return result;
+        } finally {
+          channels.releaseMove(transfer);
+        }
+      }
+      case "unpackSession": {
+        try {
+          const result = await sessionOps.unpackSession(args.transfer as string, args.cwd as string, args.move as Parameters<typeof sessionOps.unpackSession>[2]);
+          if (!(isRecord(result) && result.ok === false)) sessionsChanged();
+          return result;
+        } finally {
+          if (typeof args.transfer === "string") channels.releaseMove(args.transfer);
+        }
+      }
+      case "discardSessionPack": {
+        try {
+          return await sessionOps.discardSessionPack(args.transfer as string);
+        } finally {
+          if (typeof args.transfer === "string") channels.releaseMove(args.transfer);
+        }
       }
       case "sessionFileExists": return localHost.sessionFileExists(sessionsPath(args.path));
       case "invalidateSessionLists": invalidateWorkspaceRoots(); localHost.invalidateSessionLists(args.path === undefined ? undefined : sessionsPath(args.path)); sessionsChanged(); return;
@@ -510,6 +540,9 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         else throw new HostOpError(400, "invalid_request", "Invalid cluster configuration request");
         return { state: config.state(), owned: config.holds(link.login.url) };
       default: {
+        if (op === "renameSessionFile" && typeof args.id === "string" && channels.isMoving(args.id)) {
+          throw new HostOpError(409, "session_busy", "This session is currently being moved");
+        }
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map(name => args[name]));
         if (op === "addProject" || op === "updateProject" || op === "hideProject") invalidateWorkspaceRoots();
