@@ -1,5 +1,6 @@
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getProviderUsageAccounts, renameProviderUsageAccount, updateProviderUsageAccount } from "@/lib/provider-usage";
+import { saveWebServerSettings } from "@/lib/web-settings";
 import { isRecord } from "@/lib/type-guards";
 
 const PROVIDER_RE = /^[A-Za-z0-9._:/-]{1,200}$/;
@@ -16,12 +17,21 @@ export async function GET(request: Request) {
 }
 
 /**
- * Body `{ key, name }` names an account (`name: null` or blank clears it); `{ provider, credentialId,
- * paused?, limitPercent?, priority? }` changes a stored one, `null` clearing a limit or priority.
+ * Body `{ order }` saves the rows' order (`ProviderUsageAccount.key`s); `{ key, name }` names an account
+ * (`name: null` or blank clears it); `{ provider, credentialId, paused?, limitPercent?, priority? }`
+ * changes a stored one, `null` clearing a limit or priority.
  */
 export async function PATCH(request: Request) {
   const body: unknown = await request.json().catch(() => null);
   if (!isRecord(body)) return Response.json({ error: "Body must be a JSON object" }, { status: 400 });
+  if (body.order !== undefined) {
+    const { order } = body;
+    if (!Array.isArray(order) || order.length > 500 || order.some((key) => typeof key !== "string" || key.length > 300)) {
+      return Response.json({ error: "order must be an array of at most 500 account keys" }, { status: 400 });
+    }
+    saveWebServerSettings({ accountOrder: order as string[] });
+    return Response.json({ ok: true });
+  }
   if (body.key !== undefined) {
     const { key, name } = body;
     if (typeof key !== "string" || key.length > 300 || (name !== null && (typeof name !== "string" || name.length > 80))) {

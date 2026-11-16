@@ -37,20 +37,25 @@ function Bar({ percent, limit, tone }: { percent: number; limit?: number; tone: 
   );
 }
 
-/** Every window the account reports, side by side: "5H ▬ 12%  7D ▬ 54%". */
-function WindowMeters({ windows, limit }: { windows: Partial<Record<(typeof WINDOWS)[number]["key"], ProviderUsageWindow>>; limit?: number }) {
+type WindowKey = (typeof WINDOWS)[number]["key"];
+
+/**
+ * One bucket's windows side by side: "5H ▬ 12%  7D ▬ 54%". `slots` are the windows any bucket of the
+ * account has, so stacked lines keep their columns when a bucket lacks one.
+ */
+function WindowMeters({ windows, slots, limit }: { windows: Partial<Record<WindowKey, ProviderUsageWindow>>; slots: readonly WindowKey[]; limit?: number }) {
   return (
     <span style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-      {WINDOWS.map(({ short, key }) => {
+      {WINDOWS.filter(({ key }) => slots.includes(key)).map(({ short, key }) => {
         const window = windows[key];
-        if (!window) return null;
+        if (!window) return <span key={key} style={{ flex: 1, minWidth: 0 }} />;
         const pct = Math.round(window.percent);
         const tone = limitTone(pct, limit);
         return (
           <span key={key} style={{ display: "flex", alignItems: "center", gap: 5, flex: 1, minWidth: 0 }}>
             <span style={{ fontSize: 9, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.04em", flexShrink: 0 }}>{short}</span>
             <Bar percent={pct} limit={limit} tone={tone} />
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{pct}%</span>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums", flexShrink: 0, minWidth: 30, textAlign: "right" }}>{pct}%</span>
           </span>
         );
       })}
@@ -191,7 +196,30 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
     const timer = window.setTimeout(() => setRefreshDone(false), 2000);
     return () => window.clearTimeout(timer);
   }, [refreshDone]);
-  const accounts = snapshot?.accounts ?? [];
+  // A dropped order shows at once and stays until the server's next snapshot carries it.
+  const [localOrder, setLocalOrder] = useState<string[] | null>(null);
+  useEffect(() => setLocalOrder(null), [snapshot]);
+  const accounts = localOrder
+    ? [...(snapshot?.accounts ?? [])].sort((a, b) => localOrder.indexOf(a.key) - localOrder.indexOf(b.key))
+    : snapshot?.accounts ?? [];
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dropKey, setDropKey] = useState<string | null>(null);
+  const moveAccount = (from: string, to: string) => {
+    const order = accounts.map((account) => account.key).filter((key) => key !== from);
+    order.splice(accounts.findIndex((account) => account.key === to), 0, from);
+    setLocalOrder(order);
+    void fetch("/api/provider-usage/accounts", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ order }),
+    }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return reload();
+    }).catch((cause: unknown) => {
+      setLocalOrder(null);
+      toast.error(t("providerUsage.reorderFailed", { error: cause instanceof Error ? cause.message : String(cause) }));
+    });
+  };
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -352,9 +380,12 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
                   ) : null}
                 </span>
                 {!account.paused && (
-                  <span style={{ display: "block", width: "100%", paddingLeft: 17, boxSizing: "border-box" }}>
+                  <span style={{ display: "flex", flexDirection: "column", gap: 3, width: "100%", paddingLeft: 17, boxSizing: "border-box" }}>
                     {hasWindows ? (
-                      <WindowMeters windows={account} limit={account.limitPercent} />
+                      // Each bucket is its own quota (Gemini vs Argon, shared vs Fable): one unlabelled line each.
+                      (account.buckets ?? [account]).map((bucket, bucketIndex) => (
+                        <WindowMeters key={bucketIndex} windows={bucket} slots={WINDOWS.flatMap(({ key: windowKey }) => (account[windowKey] ? [windowKey] : []))} limit={account.limitPercent} />
+                      ))
                     ) : (
                       <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{t("appShell.providerUsageNoData")}</span>
                     )}
@@ -363,7 +394,31 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
               </>
             );
             return (
-              <div key={key} style={{ borderRadius: "var(--radius-control)", background: expanded ? "var(--bg-subtle)" : "transparent" }}>
+              <div
+                key={key}
+                draggable={!editing}
+                onDragStart={(event) => { event.dataTransfer.setData("text/plain", key); event.dataTransfer.effectAllowed = "move"; setDragKey(key); }}
+                onDragOver={(event) => {
+                  if (!dragKey || dragKey === key) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                  setDropKey(key);
+                }}
+                onDragLeave={() => setDropKey((current) => (current === key ? null : current))}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (dragKey && dragKey !== key) moveAccount(dragKey, key);
+                  setDragKey(null);
+                  setDropKey(null);
+                }}
+                onDragEnd={() => { setDragKey(null); setDropKey(null); }}
+                style={{
+                  borderRadius: "var(--radius-control)",
+                  background: expanded ? "var(--bg-subtle)" : "transparent",
+                  opacity: dragKey === key ? 0.5 : 1,
+                  ...(dropKey === key ? { outline: "1px solid var(--accent)", outlineOffset: -1 } : {}),
+                }}
+              >
                 {/* A div, not a button: the rename input sits inside the row. */}
                 <div
                   role="button"
