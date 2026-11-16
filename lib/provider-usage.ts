@@ -1,9 +1,23 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { OMP_NOT_FOUND, resolveOmpBin } from "./omp/omp-cli";
+import { runUtilityCommand } from "./omp/rpc-utility";
+import { readAccountPolicyConfig, writeAccountPolicies } from "./omp/settings-config";
 import { createChildProcessEnvironment } from "./project-command-env";
+import {
+  accountPolicyValue,
+  canNameAccount,
+  reportMatchesAccount,
+  withAccountPolicy,
+  type AccountIdentity,
+  type StoredUsageAccount,
+} from "./provider-accounts";
 import { asNumber, isRecord } from "./type-guards";
+import { loadWebServerSettings, readWebServerSettingsFromDisk, saveWebServerSettings } from "./web-settings";
 import type {
+  ProviderUsageAccount,
+  ProviderUsageAccountsSnapshot,
+  ProviderUsageBucket,
   ProviderUsageReport,
   ProviderUsageSnapshot,
   ProviderUsageWindowId,
@@ -189,7 +203,7 @@ function normalizeReport(
   });
 }
 
-export function parseProviderUsageOutput(output: string, query: UsageQuery = {}, now = Date.now()): ProviderUsageSnapshot {
+function parseUsagePayload(output: string): Record<string, unknown> {
   let payload: unknown;
   try {
     payload = JSON.parse(output);
@@ -197,18 +211,160 @@ export function parseProviderUsageOutput(output: string, query: UsageQuery = {},
     throw new Error("omp usage returned invalid JSON");
   }
   if (!isRecord(payload)) throw new Error("omp usage returned an invalid response");
-  const rawReports = Array.isArray(payload.reports) ? payload.reports : [];
-  const reports = rawReports.flatMap((report, index) => isRecord(report) ? normalizeReport(report, query, now, index) : []);
-  const accountsWithoutUsage = Array.isArray(payload.accountsWithoutUsage) ? payload.accountsWithoutUsage : [];
-  for (const [index, account] of accountsWithoutUsage.entries()) {
-    if (!isRecord(account)) continue;
-    reports.push(...normalizeReport({
-      provider: account.provider,
-      metadata: { email: account.email },
-    }, query, now, rawReports.length + index));
+  return payload;
+}
+
+/**
+ * omp's raw reports, then its accounts that reported no usage as report-shaped records. Malformed
+ * entries stay as `undefined` so "Account N" keeps counting omp's own positions.
+ */
+function rawUsageReports(payload: Record<string, unknown>): (Record<string, unknown> | undefined)[] {
+  const reports = Array.isArray(payload.reports) ? payload.reports : [];
+  const withoutUsage = Array.isArray(payload.accountsWithoutUsage) ? payload.accountsWithoutUsage : [];
+  return [
+    ...reports.map((report) => (isRecord(report) ? report : undefined)),
+    ...withoutUsage.map((account) => (isRecord(account) ? { provider: account.provider, metadata: account } : undefined)),
+  ];
+}
+
+export function parseProviderUsageOutput(output: string, query: UsageQuery = {}, now = Date.now()): ProviderUsageSnapshot {
+  const payload = parseUsagePayload(output);
+  const reports = rawUsageReports(payload).flatMap((report, index) => (report ? normalizeReport(report, query, now, index) : []));
+  return { generatedAt: asNumber(payload.generatedAt) ?? null, reports };
+}
+
+/** Mirrors omp's `usageReportIdentity`: metadata first, then the first limit scope carrying the id. */
+function reportIdentity(rawReport: Record<string, unknown>): AccountIdentity {
+  const metadata = isRecord(rawReport.metadata) ? rawReport.metadata : {};
+  const limits = Array.isArray(rawReport.limits) ? rawReport.limits : [];
+  const scoped = (key: string) => limits
+    .map((limit) => (isRecord(limit) && isRecord(limit.scope) ? nonEmptyString(limit.scope[key]) : undefined))
+    .find((value) => value !== undefined);
+  return {
+    email: nonEmptyString(metadata.email),
+    accountId: nonEmptyString(metadata.accountId) ?? scoped("accountId"),
+    projectId: nonEmptyString(metadata.projectId) ?? scoped("projectId"),
+    orgId: nonEmptyString(metadata.orgId) ?? scoped("orgId"),
+  };
+}
+
+function bucketLabel(report: ProviderUsageReport): string | undefined {
+  if (report.bucket) return report.bucket;
+  // Anthropic's tier is its model bucket ("fable"); other providers' tiers name quota groups as they are.
+  if (report.tier) return report.provider === "anthropic" ? report.tier.charAt(0).toUpperCase() + report.tier.slice(1) : report.tier;
+  return report.modelId;
+}
+
+const WINDOW_KEYS = ["fiveHour", "sevenDay", "monthly"] as const;
+
+function mergeAccount(splits: ProviderUsageReport[], provider: string, index: number): Omit<ProviderUsageAccount, "key"> {
+  const first = splits[0];
+  const account: Omit<ProviderUsageAccount, "key"> = {
+    provider,
+    ...(first?.accountLabel ? { accountLabel: first.accountLabel } : { accountIndex: index + 1 }),
+    ...(first?.plan ? { plan: first.plan } : {}),
+  };
+  // omp repeats one quota per model drawing on it (Antigravity's Gemini models): one bucket per label.
+  const buckets = new Map<string | undefined, ProviderUsageBucket>();
+  for (const split of splits) {
+    const label = bucketLabel(split);
+    const bucket = buckets.get(label) ?? { label };
+    buckets.set(label, bucket);
+    for (const key of WINDOW_KEYS) {
+      const window = split[key];
+      if (!window) continue;
+      if (!bucket[key] || window.percent > bucket[key].percent) bucket[key] = window;
+      if (!account[key] || window.percent > account[key].percent) account[key] = window;
+    }
   }
-  const generatedAt = asNumber(payload.generatedAt) ?? null;
-  return { generatedAt, reports };
+  if (buckets.size > 1) account.buckets = [...buckets.values()];
+  return account;
+}
+
+/** The account's limit (100 - reservePct) and priority from its `auth.accountPolicies` entry. */
+function policyFields(policies: readonly unknown[], provider: string, account: AccountIdentity): Pick<ProviderUsageAccount, "limitPercent" | "priority"> {
+  const reservePct = accountPolicyValue(policies, provider, account, "reservePct");
+  const priority = accountPolicyValue(policies, provider, account, "priority");
+  return { ...(reservePct !== undefined ? { limitPercent: 100 - reservePct } : {}), ...(priority !== undefined ? { priority } : {}) };
+}
+
+/**
+ * One entry per account omp reports, its usage splits merged, matched to the stored account it came
+ * from. Paused accounts report no usage, so they are listed from `stored`. Without `stored` (a runner
+ * predating `get_usage_accounts`) nothing carries a credential id and nothing can be changed.
+ */
+export function parseProviderUsageAccounts(
+  output: string,
+  stored: readonly StoredUsageAccount[] | null,
+  policies: readonly unknown[],
+  now = Date.now(),
+): { generatedAt: number | null; accounts: ProviderUsageAccount[] } {
+  const payload = parseUsagePayload(output);
+  const entries = rawUsageReports(payload).flatMap((raw, index) => {
+    const provider = nonEmptyString(raw?.provider);
+    if (!raw || !provider) return [];
+    return [{ provider, index, identity: reportIdentity(raw), splits: normalizeReport(raw, {}, now, index) }];
+  });
+  const claimed = new Set<number>();
+  const accounts: Omit<ProviderUsageAccount, "key">[] = [];
+  for (const entry of entries) {
+    const providerAccounts = (stored ?? []).filter((account) => account.provider === entry.provider);
+    const matches = providerAccounts.filter((account) => reportMatchesAccount(entry.identity, account));
+    const active = matches.filter((account) => !account.paused);
+    // A report fetched before its account was paused: the paused row below stands for it.
+    if (active.length === 0 && matches.length > 0) continue;
+    const activeAccounts = providerAccounts.filter((account) => !account.paused);
+    // Copilot credentials carry no identity: a provider's only account is its only report.
+    const match = active.length === 1
+      ? active[0]
+      : active.length === 0 && activeAccounts.length === 1 && entries.filter((other) => other.provider === entry.provider).length === 1
+        ? activeAccounts[0]
+        : undefined;
+    const account = mergeAccount(entry.splits, entry.provider, entry.index);
+    if (match && !claimed.has(match.credentialId)) {
+      claimed.add(match.credentialId);
+      account.credentialId = match.credentialId;
+      Object.assign(account, policyFields(policies, entry.provider, match));
+      account.canPrioritize = canNameAccount(match);
+      account.canLimit = account.canPrioritize && WINDOW_KEYS.some((key) => account[key]);
+    }
+    accounts.push(account);
+  }
+  for (const [offset, paused] of (stored ?? []).filter((account) => account.paused).entries()) {
+    accounts.push({
+      provider: paused.provider,
+      ...(paused.email ? { accountLabel: paused.email } : { accountIndex: entries.length + offset + 1 }),
+      credentialId: paused.credentialId,
+      paused: true,
+      ...policyFields(policies, paused.provider, paused),
+    });
+  }
+  return {
+    generatedAt: asNumber(payload.generatedAt) ?? null,
+    // shortcut: an account without a stored credential is keyed by its label or omp's position, so a
+    // name for "Account 5" follows the position if omp reorders its reports; key it by identity when that bites.
+    accounts: accounts.map((account) => ({
+      ...account,
+      key: `${account.provider}:${account.credentialId ?? account.accountLabel ?? `#${account.accountIndex}`}`,
+    })),
+  };
+}
+
+async function listStoredUsageAccounts(): Promise<StoredUsageAccount[]> {
+  const { accounts } = await runUtilityCommand<{ accounts?: unknown }>({ type: "get_usage_accounts" }, 30_000);
+  if (!Array.isArray(accounts)) throw new Error("get_usage_accounts returned no accounts");
+  return accounts.flatMap((row) => {
+    if (!isRecord(row) || !Number.isInteger(row.credentialId) || typeof row.provider !== "string" || typeof row.paused !== "boolean") return [];
+    return [{
+      credentialId: row.credentialId as number,
+      provider: row.provider,
+      paused: row.paused,
+      email: nonEmptyString(row.email),
+      accountId: nonEmptyString(row.accountId),
+      projectId: nonEmptyString(row.projectId),
+      orgId: nonEmptyString(row.orgId),
+    }];
+  });
 }
 
 async function fetchProviderUsage(refresh = false): Promise<string> {
@@ -254,4 +410,50 @@ function getUsageOutput(refresh = false): Promise<string> {
 
 export async function getProviderUsage(query: UsageQuery = {}, refresh = false): Promise<ProviderUsageSnapshot> {
   return parseProviderUsageOutput(await getUsageOutput(refresh), query);
+}
+
+export async function getProviderUsageAccounts(refresh = false): Promise<ProviderUsageAccountsSnapshot> {
+  const [output, stored] = await Promise.all([getUsageOutput(refresh), listStoredUsageAccounts().catch(() => null)]);
+  const { policies, reservePct } = readAccountPolicyConfig();
+  const names = loadWebServerSettings().accountNames;
+  const { generatedAt, accounts } = parseProviderUsageAccounts(output, stored, policies);
+  return {
+    generatedAt,
+    accounts: accounts.map((account) => (names[account.key] ? { ...account, name: names[account.key] } : account)),
+    defaultLimitPercent: 100 - reservePct,
+  };
+}
+
+/** Names an account in the overview (`null` or blank: back to its email or "Account N"). */
+export function renameProviderUsageAccount(key: string, name: string | null): void {
+  const accountNames = { ...readWebServerSettingsFromDisk().accountNames };
+  const trimmed = name?.trim();
+  if (trimmed) accountNames[key] = trimmed;
+  else delete accountNames[key];
+  saveWebServerSettings({ accountNames });
+}
+
+/** Pause or resume a stored account, or set (`null`: clear) its usage limit or priority. */
+export async function updateProviderUsageAccount(
+  provider: string,
+  credentialId: number,
+  change: { paused?: boolean; limitPercent?: number | null; priority?: number | null },
+): Promise<void> {
+  if (change.limitPercent !== undefined || change.priority !== undefined) {
+    const siblings = (await listStoredUsageAccounts()).filter((account) => account.provider === provider);
+    const account = siblings.find((candidate) => candidate.credentialId === credentialId);
+    if (!account) throw new Error(`No stored ${provider} account ${credentialId}`);
+    if (!canNameAccount(account)) throw new Error("omp cannot name this account in a policy: it has no email, account or project id");
+    let policies = readAccountPolicyConfig().policies;
+    if (change.limitPercent !== undefined) {
+      policies = withAccountPolicy(policies, provider, account, siblings, "reservePct", change.limitPercent === null ? null : 100 - change.limitPercent);
+    }
+    if (change.priority !== undefined) policies = withAccountPolicy(policies, provider, account, siblings, "priority", change.priority);
+    writeAccountPolicies(policies);
+  }
+  if (change.paused !== undefined) {
+    await runUtilityCommand({ type: "set_account_paused", providerId: provider, credentialId, paused: change.paused }, 120_000);
+  }
+  // The cached report still lists a paused account as active and lacks a resumed one.
+  usageCache = undefined;
 }

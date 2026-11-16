@@ -3,17 +3,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
-const { useProviderUsage, usageBucketLabel } = await import("./AppShell-provider-usage.ts");
+const { useProviderUsage } = await import("./AppShell-provider-usage.ts");
 
-test("usageBucketLabel distinguishes Anthropic tiers and Antigravity buckets (#284)", () => {
-  assert.equal(usageBucketLabel({ provider: "anthropic", tier: "fable" }), "Fable");
-  assert.equal(usageBucketLabel({ provider: "anthropic" }), undefined);
-  assert.equal(usageBucketLabel({ provider: "google-antigravity", bucket: "Gemini" }), "Gemini");
-  assert.equal(usageBucketLabel({ provider: "google-antigravity", bucket: "Claude & GPT (shared)" }), "Claude & GPT (shared)");
-  assert.equal(usageBucketLabel({ provider: "google-antigravity", bucket: "Gemini", tier: "pro" }), "Gemini");
-  // Other providers' tiers are quota tiers, not bucket names.
-  assert.equal(usageBucketLabel({ provider: "openai-codex", tier: "pro" }), undefined);
-});
 const snapshot = (percent) => ({ reports: [{ provider: "provider", fiveHour: { percent } }] });
 
 test("manual refresh gets fresh limits on older browsers while automatic polling stays silent", async () => {

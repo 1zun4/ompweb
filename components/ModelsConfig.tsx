@@ -1037,7 +1037,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean }) {
+export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, focusProvider }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean; focusProvider?: { id: string } | null }) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
   const [config, setConfig] = useState<ModelsFileData>({ providers: {} });
@@ -1124,6 +1124,19 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     loadApiKeyProviders();
     loadRuntimeModels();
   }, [loadConfig, loadOAuthProviders, loadApiKeyProviders, loadRuntimeModels]);
+
+  // Opened from a provider usage row: show that provider once the lists are in, once per request.
+  const focusedRef = useRef<{ id: string } | null>(null);
+  useEffect(() => {
+    if (!focusProvider || focusedRef.current === focusProvider) return;
+    const type = oauthProviders.some((p) => p.id === focusProvider.id)
+      ? "oauth"
+      : apiKeyProviders.some((p) => p.id === focusProvider.id) ? "apikey" : null;
+    if (!type) return;
+    focusedRef.current = focusProvider;
+    setSubTab("connected");
+    setSelection({ type, providerId: focusProvider.id });
+  }, [focusProvider, oauthProviders, apiKeyProviders]);
 
   useEffect(() => {
     try {
