@@ -10,6 +10,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 - **Usage includes linked hosts.** Settings → Usage now counts the tokens and cost of sessions on every linked host, not only this machine. Each host's daemon reads its own transcripts; the web server keeps a copy, so a host that goes offline keeps its last numbers. A new **Host** breakdown shows each machine's share and when an offline host last synced, and project rows name their host. A host that is still syncing fills in on its own. Refresh reads every host's sessions again, with the prices in that host's `models.yml`. A host on an older ompweb is listed as needing an update.
 - **Move sessions by drag and drop.** Drag a session onto another workspace in the sidebar, on the same host or another one. The session is told where it came from: host, working directory, home directory and operating system. A copy left on another host is archived there.
+- **Provider Usage shows one row per account with every limit window at once.** Splits such as Anthropic's Fable bucket or Antigravity's model quotas merge into their account; open a row for each split's reset time. The 5H/7D switch is gone. Double-click an account to rename it. An open row sets the account's usage limit (omp's per-account reserve: above it omp uses the provider's other accounts first), marks it preferred (omp's account priority: used first while below its limit), pauses it without signing out, and opens it in API Keys & Providers.
 
 ### Fixed
 

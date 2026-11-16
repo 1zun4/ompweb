@@ -14,23 +14,6 @@ export function formatUsageReset(value: number, unit: "minutes" | "hours"): stri
   return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }
 
-/**
- * Label that distinguishes one usage row from another row for the same
- * provider and account, or undefined when the row needs none.
- * Antigravity rows carry their bucket ("Gemini", "Claude & GPT (shared)");
- * Anthropic rows carry their tier, capitalised ("Fable", "Opus", "Sonnet")
- * — the shared account-wide row has no tier and stays plain "Anthropic".
- * Other providers' tiers are quota tiers, not bucket names, so they are
- * not promoted to a label here.
- */
-export function usageBucketLabel(report: ProviderUsageReport): string | undefined {
-  if (report.bucket) return report.bucket;
-  if (report.provider === "anthropic" && report.tier) {
-    return report.tier.charAt(0).toUpperCase() + report.tier.slice(1);
-  }
-  return undefined;
-}
-
 export function usageTone(percent: number): string {
   if (percent >= 80) return "var(--status-error)";
   if (percent >= 50) return "var(--status-warning)";
@@ -62,16 +45,22 @@ export function formatProviderUsageReport(report: ProviderUsageReport, noLimitsL
   return parts.join(" · ");
 }
 
-export type ProviderUsageState = {
-  snapshot: ProviderUsageSnapshot | null;
+export type ProviderUsageState<T = ProviderUsageSnapshot> = {
+  snapshot: T | null;
   loading: boolean;
   error: boolean;
 };
 
-export function useProviderUsage(query: string | null, refreshMs?: number): ProviderUsageState & { refresh: () => Promise<boolean> } {
-  const [state, setState] = useState<ProviderUsageState>({ snapshot: null, loading: false, error: false });
-  const refreshRef = useRef<() => Promise<boolean>>(async () => false);
-  const refresh = useCallback(() => refreshRef.current(), []);
+/** Polls `path` (`refresh()` asks omp for fresh limits, `reload()` only re-reads omp-web's view). */
+export function useProviderUsage<T = ProviderUsageSnapshot>(
+  query: string | null,
+  refreshMs?: number,
+  path = "/api/provider-usage",
+): ProviderUsageState<T> & { refresh: () => Promise<boolean>; reload: () => Promise<boolean> } {
+  const [state, setState] = useState<ProviderUsageState<T>>({ snapshot: null, loading: false, error: false });
+  const refreshRef = useRef<(force: boolean) => Promise<boolean>>(async () => false);
+  const refresh = useCallback(() => refreshRef.current(true), []);
+  const reload = useCallback(() => refreshRef.current(false), []);
   useEffect(() => {
     if (query === null) {
       setState({ snapshot: null, loading: false, error: false });
@@ -93,9 +82,9 @@ export function useProviderUsage(query: string | null, refreshMs?: number): Prov
       inFlightForced = force;
       inFlight = (async () => {
         try {
-          const response = await fetch(`/api/provider-usage${queryString ? `?${queryString}` : ""}`, { signal: controller.signal });
+          const response = await fetch(`${path}${queryString ? `?${queryString}` : ""}`, { signal: controller.signal });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const snapshot = await response.json() as ProviderUsageSnapshot;
+          const snapshot = await response.json() as T;
           if (controller.signal.aborted) return false;
           setState({ snapshot, loading: false, error: false });
           return true;
@@ -108,7 +97,7 @@ export function useProviderUsage(query: string | null, refreshMs?: number): Prov
       })();
       return inFlight;
     };
-    refreshRef.current = () => load(true);
+    refreshRef.current = load;
     void load();
     const interval = refreshMs ? window.setInterval(() => void load(), refreshMs) : undefined;
     return () => {
@@ -116,6 +105,6 @@ export function useProviderUsage(query: string | null, refreshMs?: number): Prov
       controller.abort();
       if (interval !== undefined) window.clearInterval(interval);
     };
-  }, [query, refreshMs]);
-  return { ...state, refresh };
+  }, [query, refreshMs, path]);
+  return { ...state, refresh, reload };
 }
