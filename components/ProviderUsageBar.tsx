@@ -379,7 +379,8 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
                     </span>
                   ) : null}
                 </span>
-                {!account.paused && (
+                {/* An open row lists the same quotas with names and resets below. */}
+                {!account.paused && !expanded && (
                   <span style={{ display: "flex", flexDirection: "column", gap: 3, width: "100%", paddingLeft: 17, boxSizing: "border-box" }}>
                     {hasWindows ? (
                       // Each bucket is its own quota (Gemini vs Argon, shared vs Fable): one unlabelled line each.
