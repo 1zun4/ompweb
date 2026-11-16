@@ -13,6 +13,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ### Fixed
 
 - **Refreshing Usage applies changed prices, and says when it fails.** Prices edited in `models.yml` now apply to existing sessions when you refresh Settings → Usage. They used to keep the old prices until the web server restarted. A refresh that fails now shows the error above the last report instead of leaving it up without a word.
+- **GitHub workflow watches no longer regress to stale run states.** Workflow updates retain GitHub's run timestamp and ignore older snapshots for the same or an earlier attempt, so a delayed `queued` response cannot follow a newer `in_progress` delivery.
 
 ## [v0.7.2] - 2026-11-14
 
@@ -31,6 +32,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - **Windows update status publication tolerates brief file-sharing conflicts.** Atomic replacement retries sharing-related errors for at most one second without deleting the prior state. Persistent failures still stop the update and report the error.
 - **Local-host startup ignores unrelated services.** Installation paths match at directory boundaries, and daemon detection distinguishes the host subcommand from directory names or server argument values.
 - **Open live subagent transcripts without waiting forever.** Transcript pages now read the subagent's on-disk artifact directly instead of waiting for its busy agent process to answer first.
+- **Select reasoning effort for fallback models.** Settings → Models → Native OMP Retry & Fallback now stores each fallback as `provider/model:effort`, while leaving the effort unset uses the model default.
 
 ### Added
 
