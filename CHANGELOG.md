@@ -8,7 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
-- **Provider Usage shows one row per account with every limit window at once.** Splits such as Anthropic's Fable bucket or Antigravity's model quotas merge into their account; open a row for each split's reset time. The 5H/7D switch is gone. Double-click an account to rename it. An open row sets the account's usage limit (omp's per-account reserve: above it omp uses the provider's other accounts first), marks it preferred (omp's account priority: used first while below its limit), pauses it without signing out, and opens it in API Keys & Providers.
+- **Provider Usage shows one row per account with every limit window at once.** Splits such as Anthropic's Fable bucket or Antigravity's model quotas merge into their account; open a row for each split's reset time. The 5H/7D switch is gone. Each quota gets its own meter line; drag an account to reorder, double-click it to rename it. An open row sets the account's usage limit (omp's per-account reserve: above it omp uses the provider's other accounts first), marks it preferred (omp's account priority: used first while below its limit), pauses it without signing out, and opens it in API Keys & Providers.
 
 ### Fixed
 
