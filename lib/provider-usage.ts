@@ -415,11 +415,14 @@ export async function getProviderUsage(query: UsageQuery = {}, refresh = false):
 export async function getProviderUsageAccounts(refresh = false): Promise<ProviderUsageAccountsSnapshot> {
   const [output, stored] = await Promise.all([getUsageOutput(refresh), listStoredUsageAccounts().catch(() => null)]);
   const { policies, reservePct } = readAccountPolicyConfig();
-  const names = loadWebServerSettings().accountNames;
+  const { accountNames: names, accountOrder } = loadWebServerSettings();
   const { generatedAt, accounts } = parseProviderUsageAccounts(output, stored, policies);
+  // Rows the user placed come first in their order; new ones follow in omp's order.
+  const rank = (key: string, index: number) => (accountOrder.includes(key) ? accountOrder.indexOf(key) : accountOrder.length + index);
+  const ordered = accounts.map((account, index) => ({ account, rank: rank(account.key, index) })).sort((a, b) => a.rank - b.rank);
   return {
     generatedAt,
-    accounts: accounts.map((account) => (names[account.key] ? { ...account, name: names[account.key] } : account)),
+    accounts: ordered.map(({ account }) => (names[account.key] ? { ...account, name: names[account.key] } : account)),
     defaultLimitPercent: 100 - reservePct,
   };
 }

@@ -38,6 +38,8 @@ export interface WebServerSettings {
   uploadRetentionDays: number | null;
   /** Names for accounts in the sidebar's provider usage, keyed by `ProviderUsageAccount.key`. */
   accountNames: Record<string, string>;
+  /** Order of the sidebar's provider usage rows (`ProviderUsageAccount.key`); unlisted rows follow in omp's order. */
+  accountOrder: string[];
 }
 
 const DEFAULTS: WebServerSettings = {
@@ -49,6 +51,7 @@ const DEFAULTS: WebServerSettings = {
   browserTransport: "ws",
   uploadRetentionDays: DEFAULT_UPLOAD_RETENTION_DAYS,
   accountNames: {},
+  accountOrder: [],
 };
 
 /** What every hello and `transport` frame tells the browser. */
@@ -103,6 +106,7 @@ function normalizeSettings(raw: Record<string, unknown>): WebServerSettings {
     browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
     uploadRetentionDays: isUploadRetentionDays(raw.uploadRetentionDays) ? raw.uploadRetentionDays : DEFAULT_UPLOAD_RETENTION_DAYS,
     accountNames: readStringRecord(raw.accountNames),
+    accountOrder: Array.isArray(raw.accountOrder) ? raw.accountOrder.filter((key): key is string => typeof key === "string") : [],
   };
 }
 
