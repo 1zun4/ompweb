@@ -35,6 +35,7 @@ import {
 } from "@/lib/notification-client";
 import { BROWSER_TRANSPORTS, type BrowserTransport } from "@/lib/event-stream-protocol";
 import { setConnectionDiagnosticsEnabled, useConnectionDiagnosticsEnabled } from "@/lib/connection-diagnostics-prefs";
+import type { GithubActionsOperation, GithubActionsPermission, GithubActionsPermissions } from "@/lib/web-settings";
 const SettingsTabLoading = () => {
   const { t } = useI18n();
   return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("settingsConfig.loadingSettings")}</div>;
@@ -203,8 +204,11 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "model-breakdown", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.breakdown", descKey: "usageConfig.model", fallbackSection: "Usage", fallbackLabel: "Model Breakdown", fallbackDesc: "Historical token usage and cost per model, day, and project", scope: "UI" },
   // Windows Background Service & System Tray
   { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
-  { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
-  { id: "github-writes-unasked", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.githubWritesUnasked", descKey: "settingsConfig.githubWritesUnaskedDesc", fallbackSection: "System", fallbackLabel: "Allow agent GitHub writes without asking", fallbackDesc: "Let agents post comments, reply in review threads and resolve threads through this server's gh login without a confirmation each time. Off: every GitHub write asks in the session first." },
+  { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow cross-session tools and GitHub tools for watching and reading issues and pull requests, writing comments and threads, and managing Actions workflow runs. Requires the GitHub CLI (gh) installed and logged in on this server." },
+  { id: "github-writes-unasked", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.githubWritesUnasked", descKey: "settingsConfig.githubWritesUnaskedDesc", fallbackSection: "System", fallbackLabel: "Allow agent GitHub writes without asking", fallbackDesc: "Let agents post comments, reply in review threads and resolve threads through this server's gh login without a confirmation each time. Off: each of those comment and thread writes asks in the session first." },
+  { id: "github-actions-dispatch", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.githubActionsDispatch", descKey: "settingsConfig.githubActionsDispatchDesc", fallbackSection: "System", fallbackLabel: "Dispatch workflows", fallbackDesc: "Choose whether agents may start GitHub Actions workflows." },
+  { id: "github-actions-cancel", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.githubActionsCancel", descKey: "settingsConfig.githubActionsCancelDesc", fallbackSection: "System", fallbackLabel: "Cancel workflow runs", fallbackDesc: "Choose whether agents may cancel running GitHub Actions workflows." },
+  { id: "github-actions-rerun", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.githubActionsRerun", descKey: "settingsConfig.githubActionsRerunDesc", fallbackSection: "System", fallbackLabel: "Rerun workflow runs", fallbackDesc: "Choose whether agents may rerun GitHub Actions workflow runs." },
   { id: "upload-retention", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.uploadRetention", descKey: "settingsConfig.uploadRetentionDesc", fallbackSection: "System", fallbackLabel: "Delete sent uploads after", fallbackDesc: "Files attached As file are deleted from each session's local://uploads folder on every host, archived sessions included, once they are this old. Never keeps them for ever." },
   { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
@@ -385,6 +389,79 @@ function GithubWritesSetting() {
       <ToggleSwitch checked={enabled === true} disabled={enabled === null || saving} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
+}
+
+const GITHUB_ACTIONS_OPERATIONS: readonly GithubActionsOperation[] = ["dispatch", "cancel", "rerun"];
+
+function GithubActionsPermissionsSetting() {
+  const { t } = useI18n();
+  const [permissions, setPermissions] = useState<GithubActionsPermissions | null>(null);
+  const [saving, setSaving] = useState(false);
+  const load = useCallback(async (response?: Response): Promise<GithubActionsPermissions | null> => {
+    try {
+      const res = response ?? await fetch("/api/web-settings");
+      if (!res.ok) return null;
+      const data: { githubActionsPermissions?: unknown } = await res.json();
+      if (!isRecord(data.githubActionsPermissions)) return null;
+      const values = data.githubActionsPermissions;
+      if (!GITHUB_ACTIONS_OPERATIONS.every((operation) => values[operation] === "deny" || values[operation] === "ask" || values[operation] === "allow")) return null;
+      return {
+        dispatch: values.dispatch as GithubActionsPermission,
+        cancel: values.cancel as GithubActionsPermission,
+        rerun: values.rerun as GithubActionsPermission,
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    void load().then((value) => { if (alive) setPermissions(value); });
+    return () => { alive = false; };
+  }, [load]);
+  const change = async (operation: GithubActionsOperation, next: GithubActionsPermission) => {
+    if (!permissions) return;
+    setPermissions({ ...permissions, [operation]: next });
+    setSaving(true);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ githubActionsPermissions: { [operation]: next } }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const saved = await load(res);
+      if (!saved) throw new Error("Invalid GitHub Actions permissions response");
+      setPermissions(saved);
+    } catch (error) {
+      setPermissions(null);
+      toast.error(t("settingsConfig.githubActionsSaveFailed"), error instanceof Error ? error.message : String(error));
+      setPermissions(await load());
+    } finally {
+      setSaving(false);
+    }
+  };
+  const options = [
+    { value: "deny", label: t("settingsConfig.githubActionsPermissionDeny") },
+    { value: "ask", label: t("settingsConfig.githubActionsPermissionAsk") },
+    { value: "allow", label: t("settingsConfig.githubActionsPermissionAllow") },
+  ];
+  const rows: Array<{ operation: GithubActionsOperation; label: string; description: string }> = [
+    { operation: "dispatch", label: t("settingsConfig.githubActionsDispatch"), description: t("settingsConfig.githubActionsDispatchDesc") },
+    { operation: "cancel", label: t("settingsConfig.githubActionsCancel"), description: t("settingsConfig.githubActionsCancelDesc") },
+    { operation: "rerun", label: t("settingsConfig.githubActionsRerun"), description: t("settingsConfig.githubActionsRerunDesc") },
+  ];
+  return rows.map(({ operation, label, description }) => (
+    <NativeSetting key={operation} searchId={`github-actions-${operation}`} label={label} description={description}>
+      <ThemedSelect
+        style={nativeSelectStyle}
+        value={permissions?.[operation] ?? "ask"}
+        disabled={permissions === null || saving}
+        options={options}
+        onChange={(next) => void change(operation, next as GithubActionsPermission)}
+      />
+    </NativeSetting>
+  ));
 }
 
 const UPLOAD_RETENTION_CHOICES: readonly (number | null)[] = [null, 7, 30, 90];
@@ -1882,6 +1959,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <AgentToolsSetting />
 
                 <GithubWritesSetting />
+
+                <GithubActionsPermissionsSetting />
 
                 <UploadRetentionSetting />
 

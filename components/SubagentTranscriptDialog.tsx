@@ -18,6 +18,7 @@ interface SubagentMessagesPage {
   reset?: boolean;
   messages: AgentMessage[];
   totalBytes?: number;
+  error?: string;
 }
 
 /** Compact, defensive row for one raw transcript message (content may be a
@@ -237,22 +238,17 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     return await res.json() as { completion: string | null; truncated: boolean };
   }, [sessionId, subagent?.id]);
 
-  // Full transcript page (RPC registry first, disk fallback) — mirrors the
-  // get_subagent_messages response shape so both sources are interchangeable.
-  const fetchTranscriptPage = useCallback(async (startByte: number, preferDisk: boolean): Promise<SubagentMessagesPage> => {
+  const fetchTranscriptPage = useCallback(async (startByte: number): Promise<SubagentMessagesPage> => {
     if (!sessionId || !subagent?.id) throw new Error("No session");
-    if (preferDisk) {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagent.id)}?fromByte=${startByte}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json() as SubagentMessagesPage;
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagent.id)}?fromByte=${startByte}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: unknown } | null;
+      throw new Error(typeof body?.error === "string" && body.error ? body.error : `HTTP ${res.status}`);
     }
-    return await sendAgentCommand<SubagentMessagesPage>(sessionId, {
-      type: "get_subagent_messages",
-      subagentId: subagent.id,
-      sessionFile: subagent.sessionFile,
-      fromByte: startByte,
-    });
-  }, [sessionId, subagent?.id, subagent?.sessionFile]);
+    const page = await res.json() as SubagentMessagesPage;
+    if (typeof page.error === "string") throw new Error(page.error);
+    return page;
+  }, [sessionId, subagent?.id]);
 
   const loadTranscriptPage = useCallback(async (startByte: number) => {
     if (!sessionId || !subagent?.id) return;
@@ -262,15 +258,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     setTranscriptLoading(true);
     setTranscriptError(null);
     try {
-      let page: SubagentMessagesPage;
-      try {
-        page = await fetchTranscriptPage(startByte, fromDisk);
-      } catch (rpcError) {
-        // The RPC registry only knows subagents of the current process; a
-        // live entry whose session restarted falls back to the disk reader.
-        if (fromDisk || !subagent.id) throw rpcError;
-        page = await fetchTranscriptPage(startByte, true);
-      }
+      const page = await fetchTranscriptPage(startByte);
       if (seq !== transcriptRequestSeqRef.current) return;
       if (page.reset) {
         setTranscriptMessages(page.messages);
@@ -286,7 +274,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     } finally {
       if (seq === transcriptRequestSeqRef.current) setTranscriptLoading(false);
     }
-  }, [sessionId, subagent?.id, fromDisk, fetchTranscriptPage]);
+  }, [sessionId, subagent?.id, fetchTranscriptPage]);
 
   const load = useCallback(async () => {
     if (!sessionId || !subagent?.id) return;
@@ -350,8 +338,8 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   // version is never dropped: a bump that arrives mid-throttle re-arms the
   // timer, and the already-processed guard prevents same-version loops.
   useEffect(() => {
-    if (!open || !sessionId || transcriptVersion === 0 || loading) return;
-    const completionDone = transcriptVersion === refetchedVersionRef.current && transcriptVersion === latestVersionRef.current;
+    if (!open || !sessionId || transcriptVersion === 0) return;
+    const completionDone = loading || (transcriptVersion === refetchedVersionRef.current && transcriptVersion === latestVersionRef.current);
     const transcriptDone = transcriptVersion === refetchedTranscriptVersionRef.current;
     if (completionDone && transcriptDone) return;
     latestVersionRef.current = transcriptVersion;
@@ -359,7 +347,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     versionDebounceTimerRef.current = setTimeout(() => {
       versionDebounceTimerRef.current = null;
       // Completion fetch: consume the version only when actually fired.
-      if (refetchedVersionRef.current !== latestVersionRef.current) {
+      if (!loading && refetchedVersionRef.current !== latestVersionRef.current) {
         refetchedVersionRef.current = latestVersionRef.current;
         void load();
       }

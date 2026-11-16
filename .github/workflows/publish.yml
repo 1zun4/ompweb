@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
 
+env:
+  TAG: ${{ github.ref_name }}
+
 permissions:
   contents: write
   id-token: write
@@ -21,7 +24,7 @@ jobs:
       - name: Verify tag matches package version
         run: |
           VERSION="$(node -p 'require("./package.json").version')"
-          test "$GITHUB_REF_NAME" = "v$VERSION"
+          test "$TAG" = "v$VERSION"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -50,6 +53,12 @@ jobs:
       # Without GH_TOKEN: bun install runs the omp packages' scripts.
       - name: Pin the runner to it
         run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
+      # Match Verify PR: allow isolated fixtures, never control of the runner's service.
+      - name: Allow isolated native fixture scopes
+        run: |
+          rule="polkit.addRule(function(action, subject) { if (action.id === 'org.freedesktop.systemd1.manage-units' && subject.user === '$(id -un)' && /\\.scope$/.test(action.lookup('unit') || '')) { return polkit.Result.YES; } });"
+          printf '%s\n' "$rule" | sudo tee /etc/polkit-1/rules.d/49-ompweb-fixture-scopes.rules >/dev/null
+          systemd-run --scope --quiet --collect --no-ask-password true
       - run: npm test
       - run: npm run build
       # Builds the omp runners too, which the source smoke spawns from runner/release/. The archives leave them out:
@@ -63,7 +72,6 @@ jobs:
       - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             node bin/generate-release-notes.js --tag "$TAG" --output release-notes.md
@@ -76,7 +84,6 @@ jobs:
       - name: Attach the binaries and the omp runners to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           runners=(ompweb-omp-linux-x64 ompweb-omp-linux-arm64 ompweb-omp-darwin-x64 ompweb-omp-darwin-arm64 ompweb-omp-windows-x64.exe)
@@ -87,7 +94,6 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
       - name: Publish to npm
@@ -108,7 +114,6 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASES_WEBHOOK }}
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           DISCORD_WEBHOOK_URL="$(printf '%s' "$DISCORD_WEBHOOK_URL" | tr -d '\r\n')"
           case "$DISCORD_WEBHOOK_URL" in

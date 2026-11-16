@@ -3,7 +3,7 @@ import { BROWSER_TRANSPORTS } from "@/lib/event-stream-protocol";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
 import { pushUploadRetention } from "@/lib/hosts/upload-retention-sync";
-import { browserTransportState, loadWebServerSettings, readWebServerSettingsFromDisk, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
+import { browserTransportState, loadWebServerSettings, readWebServerSettingsFromDisk, saveWebServerSettings, type GithubActionsOperation, type GithubActionsPermission, type WebServerSettings } from "@/lib/web-settings";
 import { isRecord } from "@/lib/type-guards";
 import { isUploadRetentionDays } from "@/lib/upload-limits";
 
@@ -33,9 +33,9 @@ export async function PUT(req: Request) {
     return Response.json({ error: "Request body must be a settings object", code: "invalid_settings" }, { status: 400 });
   }
   const payload = body as Partial<Record<keyof WebServerSettings, unknown>>;
-  const patch: Partial<WebServerSettings> = {};
+  const patch: Parameters<typeof saveWebServerSettings>[0] = {};
 
-  // Both keys are optional so a caller can update one without reading the other;
+  // Every key is optional so callers can update one setting without reading the rest;
   // anything present is still validated.
   let resumeProvided = false;
   if (payload.autoResumeSessions !== undefined) {
@@ -58,6 +58,27 @@ export async function PUT(req: Request) {
       return Response.json({ error: "githubWritesUnasked must be a boolean", code: "invalid_settings" }, { status: 400 });
     }
     patch.githubWritesUnasked = payload.githubWritesUnasked;
+  }
+
+  if (payload.githubActionsPermissions !== undefined) {
+    if (!isRecord(payload.githubActionsPermissions)) {
+      return Response.json({ error: "githubActionsPermissions must be an object", code: "invalid_settings" }, { status: 400 });
+    }
+    const operations: GithubActionsOperation[] = ["dispatch", "cancel", "rerun"];
+    const supplied = Object.keys(payload.githubActionsPermissions);
+    if (supplied.some((operation) => !operations.includes(operation as GithubActionsOperation))) {
+      return Response.json({ error: "githubActionsPermissions contains an unknown operation", code: "invalid_settings" }, { status: 400 });
+    }
+    const permissions: Partial<Record<GithubActionsOperation, GithubActionsPermission>> = {};
+    for (const operation of operations) {
+      const permission = payload.githubActionsPermissions[operation];
+      if (permission === undefined) continue;
+      if (permission !== "deny" && permission !== "ask" && permission !== "allow") {
+        return Response.json({ error: `githubActionsPermissions.${operation} must be "deny", "ask", or "allow"`, code: "invalid_settings" }, { status: 400 });
+      }
+      permissions[operation] = permission;
+    }
+    patch.githubActionsPermissions = permissions;
   }
 
   if (payload.browserTransport !== undefined) {

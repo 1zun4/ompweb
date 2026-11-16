@@ -1,4 +1,4 @@
-import { GhError, type GhRunner, type GithubTarget } from "./gh";
+import { formatTarget, GhError, type GhRunner, type GithubTarget } from "./gh";
 
 /**
  * GitHub data layer over `gh api`. Snapshots carry metadata only (ids, urls,
@@ -10,7 +10,7 @@ import { GhError, type GhRunner, type GithubTarget } from "./gh";
  * (`node_id` in REST responses), so ids from any call compare equal.
  */
 
-export type ItemKind = "pull_request" | "issue";
+export type ItemKind = "pull_request" | "issue" | "workflow_run";
 
 export interface GithubActor {
   login: string;
@@ -28,6 +28,7 @@ export interface ItemSnapshot {
   threadComments: { id: string; url: string; author: GithubActor; threadId: string; path: string; line: number | null }[];
   /** Checks are lower-cased: `conclusion` "success" | "failure" | ..., `status` "completed" | "in_progress" | ... Commit statuses map to the same words. */
   head?: { sha: string; checks: { name: string; conclusion: string | null; status: string }[] };
+  run?: { id: number; attempt: number; status: string; conclusion: string | null; sha: string };
   /** The login's GraphQL points left after the last snapshot request, and when they refill. */
   rateLimit?: { remaining: number; resetAt: string };
 }
@@ -205,6 +206,9 @@ async function allThreadComments<T extends GqlComment>(
  * Reviews page fully because a draft submitted later can precede known reviews.
  */
 export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?: ReadonlySet<string>): Promise<ItemSnapshot> {
+  if (target.kind === "workflow_run") {
+    return runSnapshot(target, await rest(run, `repos/${target.owner}/${target.repo}/actions/runs/${target.number}`));
+  }
   const vars = { owner: target.owner, repo: target.repo, number: target.number };
   let rateLimit: ItemSnapshot["rateLimit"];
   const rememberRateLimit = (next: NonNullable<ItemSnapshot["rateLimit"]>) => {
@@ -315,6 +319,30 @@ async function restPages<T>(run: GhRunner, path: string, key?: string): Promise<
   }
 }
 
+// GitHub's workflow-run statuses and conclusions, never arbitrary API text in watch updates.
+const RUN_STATUSES: Record<string, true> = { queued: true, in_progress: true, completed: true, waiting: true, requested: true, pending: true };
+const RUN_CONCLUSIONS: Record<string, true> = { success: true, failure: true, neutral: true, cancelled: true, skipped: true, timed_out: true, action_required: true, stale: true, startup_failure: true };
+
+function runSnapshot(target: GithubTarget, value: unknown): ItemSnapshot {
+  const item = value as Record<string, unknown> | null;
+  if (
+    !item || typeof item !== "object" ||
+    !Number.isSafeInteger(item.id) || item.id !== target.number || target.number <= 0 ||
+    !Number.isSafeInteger(item.run_attempt) || (item.run_attempt as number) <= 0 ||
+    typeof item.head_sha !== "string" || !/^[a-fA-F0-9]{40}$/.test(item.head_sha) ||
+    typeof item.status !== "string" || !Object.hasOwn(RUN_STATUSES, item.status) ||
+    (item.conclusion !== null && (typeof item.conclusion !== "string" || !Object.hasOwn(RUN_CONCLUSIONS, item.conclusion))) ||
+    (item.status === "completed" && item.conclusion === null)
+  ) throw new Error("Invalid GitHub workflow run metadata.");
+  return {
+    kind: "workflow_run",
+    url: formatTarget(target),
+    state: item.status === "completed" ? "closed" : "open",
+    run: { id: item.id as number, attempt: item.run_attempt as number, status: item.status, conclusion: item.conclusion as string | null, sha: item.head_sha },
+    comments: [], reviews: [], threadComments: [],
+  };
+}
+
 const DIFF_LIMIT = 1024 * 1024;
 const DIFF_MARKER = "…[diff truncated at 1 MiB]";
 
@@ -383,6 +411,19 @@ interface RestPull {
 export async function readItem(run: GhRunner, target: GithubTarget, include: ReadPart[], ids?: string[]): Promise<Record<string, unknown>> {
   const base = `repos/${target.owner}/${target.repo}`;
   const number = target.number;
+  if (target.kind === "workflow_run") {
+    if (ids !== undefined) throw new Error('"ids" is not supported for workflow runs.');
+    if (include.some((part) => part !== "summary" && part !== "checks")) throw new Error("Workflow runs support only summary and checks reads.");
+    const path = `${base}/actions/runs/${number}`;
+    const out: Record<string, unknown> = {};
+    if (include.includes("summary")) {
+      const details = await rest<Record<string, unknown>>(run, path);
+      const snapshot = runSnapshot(target, details);
+      out.summary = { ...details, kind: snapshot.kind, url: snapshot.url, state: snapshot.state, run: snapshot.run };
+    }
+    if (include.includes("checks")) out.checks = { jobs: await restPages(run, `${path}/jobs`, "jobs") };
+    return out;
+  }
   const issue = await rest<RestItem & { title: string; state: string; state_reason?: string | null; labels: { name: string }[]; pull_request?: unknown }>(run, `${base}/issues/${number}`);
   const isPull = Boolean(issue.pull_request);
   let pull: Promise<RestPull> | undefined;
@@ -550,6 +591,7 @@ export async function postComment(
   body: string,
   replyTo?: string,
 ): Promise<{ id: string; url: string; reviewId?: string; reviewDatabaseId?: string }> {
+  if (target.kind === "workflow_run") throw new Error("Comments are not supported for workflow runs.");
   const base = `repos/${target.owner}/${target.repo}`;
   if (replyTo?.startsWith("PRRT_")) {
     let data: {

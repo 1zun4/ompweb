@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import type { GithubActor, ItemSnapshot } from "./api";
+import type { GithubActor, ItemKind, ItemSnapshot } from "./api";
+import type { MessageOrigin } from "../message-origin";
+import type { GithubTarget } from "./gh";
 
 /**
  * What a watch has already reported, diffed against each snapshot. Pure: the
@@ -17,6 +19,9 @@ const REVIEW_STATES: Record<string, string> = {
   DISMISSED: "dismissed",
 };
 
+const RUN_STATUSES = ["queued", "in_progress", "completed", "waiting", "requested", "pending"];
+const RUN_CONCLUSIONS = ["success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale", "startup_failure"];
+
 type Head = NonNullable<ItemSnapshot["head"]>;
 type ReviewSnapshot = ItemSnapshot["reviews"][number] & { databaseId?: string };
 
@@ -26,6 +31,7 @@ export interface WatchCursor {
   threadCommentIds: string[];
   reportedHeads: string[];
   final: boolean;
+  run?: { attempt: number; status: string; conclusion: string | null };
 }
 
 export type GithubEvent =
@@ -33,6 +39,7 @@ export type GithubEvent =
   | { kind: "review"; id: string; url: string; author: GithubActor; state: string; commentCount: number; databaseId?: string }
   | { kind: "thread_comment"; id: string; url: string; author: GithubActor; threadId: string; line: number | null }
   | { kind: "ci"; id: string; url: string; sha: string; counts: Record<string, number> }
+  | { kind: "workflow_run"; id: string; url: string; attempt: number; status: string; conclusion: string | null; sha: string }
   | { kind: "merged"; id: string; url: string }
   | { kind: "closed"; id: string; url: string; reason?: "completed" | "not_planned" };
 
@@ -81,6 +88,7 @@ export function baselineCursor(snapshot: ItemSnapshot): WatchCursor {
     threadCommentIds: snapshot.threadComments.map((t) => t.id),
     reportedHeads: settled(head) ? [head.sha] : [],
     final: false,
+    ...(snapshot.run ? { run: { attempt: snapshot.run.attempt, status: snapshot.run.status, conclusion: snapshot.run.conclusion } } : {}),
   };
 }
 
@@ -94,6 +102,15 @@ export function diffSnapshot(
   snapshot: ItemSnapshot,
   postedIds: ReadonlySet<string>,
 ): { events: GithubEvent[]; cursor: WatchCursor } {
+  if (snapshot.kind === "workflow_run" && snapshot.run) {
+    const { id, attempt, status, conclusion, sha } = snapshot.run;
+    const ended = status === "completed";
+    const changed = cursor.run?.attempt !== attempt || cursor.run?.status !== status || cursor.run?.conclusion !== conclusion;
+    const events: GithubEvent[] = changed || (ended && !cursor.final)
+      ? [{ kind: "workflow_run", id: `${id}:${attempt}:${status}:${conclusion}`, url: snapshot.url, attempt, status, conclusion, sha }]
+      : [];
+    return { events, cursor: { ...cursor, run: { attempt, status, conclusion }, final: cursor.final || ended } };
+  }
   const reviews = snapshot.reviews as ReviewSnapshot[];
   const seenReviews = new Set(cursor.reviewIds);
   const reviewEvents: GithubEvent[] = [];
@@ -172,6 +189,11 @@ function describe(event: GithubEvent): string {
         .join(", ");
       return `- CI result for head ${event.sha}: ${counts}. url ${event.url}`;
     }
+    case "workflow_run": {
+      const status = RUN_STATUSES.includes(event.status) ? event.status : "unknown";
+      const conclusion = event.conclusion === null ? "none" : RUN_CONCLUSIONS.includes(event.conclusion) ? event.conclusion : "unknown";
+      return `- workflow run ${status}, conclusion ${conclusion}, attempt ${event.attempt}, SHA ${event.sha}. url ${event.url}`;
+    }
     case "merged":
       return `- merged. url ${event.url}`;
     case "closed": {
@@ -181,9 +203,37 @@ function describe(event: GithubEvent): string {
   }
 }
 
-/** Header, then one line per event. Only logins, association, review states, line numbers, ids and URLs come from GitHub; never check names or file paths, which a fork writes. */
+/** Header, then one line per event. Only validated metadata comes from GitHub; never check/workflow names, branches, logs or file paths, which a fork writes. */
 export function formatUpdate(targetText: string, url: string, events: GithubEvent[]): string {
   return [`GitHub update (omp-web): ${targetText} ${url}`, ...events.map(describe)].join("\n");
+}
+
+/** Bounded, prose-free provenance for one persisted update batch. */
+export function githubMessageOrigin(
+  target: GithubTarget,
+  kind: ItemKind,
+  url: string,
+  events: GithubEvent[],
+  sentAt: string,
+): MessageOrigin {
+  return {
+    v: 1,
+    kind: "github",
+    sentAt,
+    github: {
+      repo: `${target.owner}/${target.repo}`,
+      number: target.number,
+      target: kind === "workflow_run" ? "run" : kind === "pull_request" ? "pr" : "issue",
+      url,
+      events: events.slice(0, 20).map((event) => ({
+        kind: event.kind,
+        ...("author" in event ? { author: event.author.login, bot: event.author.bot } : {}),
+        ...(event.kind === "review" ? { state: event.state }
+          : event.kind === "workflow_run" ? { state: event.conclusion ?? event.status }
+          : event.kind === "closed" && event.reason ? { state: event.reason } : {}),
+      })),
+    },
+  };
 }
 
 const jsonStringContentBytes = (value: string): number => Buffer.byteLength(JSON.stringify(value)) - 2;

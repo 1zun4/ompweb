@@ -6,6 +6,10 @@ import { BROWSER_TRANSPORTS, type BrowserTransport, type BrowserTransportState }
 import { DEFAULT_UPLOAD_RETENTION_DAYS, isUploadRetentionDays } from "./upload-limits";
 import { isRecord } from "./type-guards";
 
+export type GithubActionsOperation = "dispatch" | "cancel" | "rerun";
+export type GithubActionsPermission = "deny" | "ask" | "allow";
+export type GithubActionsPermissions = Record<GithubActionsOperation, GithubActionsPermission>;
+
 /** omp-web's own server-side settings (omp's config.yml stays omp's). */
 export interface WebServerSettings {
   /** Resume sessions that were mid-run when omp-web stopped. */
@@ -20,6 +24,8 @@ export interface WebServerSettings {
   agentToolsEnabled: boolean;
   /** The GitHub agent tools may post and resolve threads as the server's `gh` account without asking the user each time. */
   githubWritesUnasked: boolean;
+  /** Per-operation approval policy for GitHub Actions mutations. */
+  githubActionsPermissions: GithubActionsPermissions;
   /**
    * Environment variables merged into the `omp` child process (issue #104).
    * Stored as a validated record; lib/omp/agent-env.ts owns the policy and
@@ -36,6 +42,7 @@ const DEFAULTS: WebServerSettings = {
   autoResumeSessions: false,
   agentToolsEnabled: false,
   githubWritesUnasked: false,
+  githubActionsPermissions: { dispatch: "ask", cancel: "ask", rerun: "ask" },
   agentEnv: {},
   browserTransport: "ws",
   uploadRetentionDays: DEFAULT_UPLOAD_RETENTION_DAYS,
@@ -56,6 +63,25 @@ function readAgentEnvRecord(value: unknown): Record<string, string> {
   return Object.fromEntries(entries);
 }
 
+function readGithubActionsPermissions(value: unknown): GithubActionsPermissions {
+  if (value === undefined) return { ...DEFAULTS.githubActionsPermissions };
+  if (!isRecord(value)) return { dispatch: "deny", cancel: "deny", rerun: "deny" };
+  const operations: GithubActionsOperation[] = ["dispatch", "cancel", "rerun"];
+  if (Object.keys(value).some((operation) => !operations.includes(operation as GithubActionsOperation))) {
+    return { dispatch: "deny", cancel: "deny", rerun: "deny" };
+  }
+  const invalid = operations.some((operation) => {
+    const permission = value[operation];
+    return permission !== undefined && permission !== "deny" && permission !== "ask" && permission !== "allow";
+  });
+  if (invalid) return { dispatch: "deny", cancel: "deny", rerun: "deny" };
+  return {
+    dispatch: (value.dispatch as GithubActionsPermission | undefined) ?? "ask",
+    cancel: (value.cancel as GithubActionsPermission | undefined) ?? "ask",
+    rerun: (value.rerun as GithubActionsPermission | undefined) ?? "ask",
+  };
+}
+
 function settingsPath(): string {
   return resolve(getAgentDir(), "omp-web-settings.json");
 }
@@ -69,6 +95,7 @@ function normalizeSettings(raw: Record<string, unknown>): WebServerSettings {
     autoResumeSessions: raw.autoResumeSessions === true,
     agentToolsEnabled: raw.agentToolsEnabled === true,
     githubWritesUnasked: raw.githubWritesUnasked === true,
+    githubActionsPermissions: readGithubActionsPermissions(raw.githubActionsPermissions),
     agentEnv: readAgentEnvRecord(raw.agentEnv),
     browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
     uploadRetentionDays: isUploadRetentionDays(raw.uploadRetentionDays) ? raw.uploadRetentionDays : DEFAULT_UPLOAD_RETENTION_DAYS,
@@ -127,8 +154,19 @@ export function readGithubWritesUnaskedFromDisk(): boolean {
   return freshSettingsRecord()?.githubWritesUnasked === true;
 }
 
+export function readGithubActionsPermissionFromDisk(operation: GithubActionsOperation): GithubActionsPermission {
+  try {
+    return readGithubActionsPermissions(parseSettingsRecord(readFileSync(settingsPath(), "utf8")).githubActionsPermissions)[operation];
+  } catch {
+    return "deny";
+  }
+}
+
+type WebServerSettingsPatch = Omit<Partial<WebServerSettings>, "githubActionsPermissions"> & {
+  githubActionsPermissions?: Partial<GithubActionsPermissions>;
+};
 /** Atomic write (temp file + rename), like the project registry. Private to its user: it holds agentEnv. */
-export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
+export function saveWebServerSettings(patch: WebServerSettingsPatch): WebServerSettings {
   const path = settingsPath();
   mkdirSync(resolve(path, ".."), { recursive: true });
   const lockPath = settingsLockPath();
@@ -139,7 +177,14 @@ export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebSer
   try {
     lock.exec("PRAGMA busy_timeout = 5000");
     lock.exec("BEGIN IMMEDIATE");
-    const settings = { ...readWebServerSettingsFromDisk(), ...patch };
+    const current = readWebServerSettingsFromDisk();
+    const settings = {
+      ...current,
+      ...patch,
+      githubActionsPermissions: patch.githubActionsPermissions
+        ? { ...current.githubActionsPermissions, ...patch.githubActionsPermissions }
+        : current.githubActionsPermissions,
+    };
     writeFileSync(temp, `${JSON.stringify(settings, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(temp, path);
     globalThis.__ompWebSettingsCache = { path, settings };
