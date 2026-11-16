@@ -728,6 +728,8 @@
   "errors.invalid_block_index": "A valid block index is required",
   "errors.invalid_branch_name": "Invalid branch name",
   "errors.invalid_conflict_strategy": "Invalid conflict strategy",
+  "errors.invalid_destination": "The destination path contains unsupported characters",
+  "errors.move_outcome_unknown": "The destination host went offline before confirming the move. Check the destination before retrying.",
   "errors.invalid_edit_target": "The edit target must be a user message",
   "errors.invalid_file_names": "Invalid file names",
   "errors.invalid_git_url": "Enter an https:// or ssh Git repository URL",

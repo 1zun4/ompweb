@@ -712,6 +712,8 @@
   "errors.invalid_block_index": "需要提供有效的块索引",
   "errors.invalid_branch_name": "分支名称无效",
   "errors.invalid_conflict_strategy": "冲突处理策略无效",
+  "errors.invalid_destination": "目标路径包含不支持的字符",
+  "errors.move_outcome_unknown": "目标主机在确认移动前离线。请先检查目标主机，再重试。",
   "errors.invalid_edit_target": "只能编辑用户消息",
   "errors.invalid_file_names": "文件名无效",
   "errors.invalid_git_url": "请输入 https:// 或 ssh 格式的 Git 仓库 URL",
