@@ -1049,6 +1049,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   const [systemTab, setSystemTab] = useState<"registry" | "picker" | "roles" | "fallbacks">("registry");
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
+  const [oauthLoaded, setOauthLoaded] = useState(false);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [runtimeModels, setRuntimeModels] = useState<RuntimeModelEntry[]>([]);
   const [connectedProviders, setConnectedProviders] = useState<ConnectedProvider[]>([]);
@@ -1065,12 +1066,14 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   const [parseError, setParseError] = useState<{ message: string; path?: string } | null>(null);
 
   const loadOAuthProviders = useCallback(() => {
+    setOauthLoaded(false);
     fetch("/api/auth/providers")
       .then((r) => r.json())
       .then((d: { providers?: OAuthProvider[] }) => {
         if (Array.isArray(d.providers)) setOauthProviders(d.providers);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setOauthLoaded(true));
   }, []);
 
   const loadApiKeyProviders = useCallback(() => {
@@ -1131,12 +1134,12 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
     if (!focusProvider || focusedRef.current === focusProvider) return;
     const type = oauthProviders.some((p) => p.id === focusProvider.id)
       ? "oauth"
-      : apiKeyProviders.some((p) => p.id === focusProvider.id) ? "apikey" : null;
+      : oauthLoaded && apiKeyProviders.some((p) => p.id === focusProvider.id) ? "apikey" : null;
     if (!type) return;
     focusedRef.current = focusProvider;
     setSubTab("connected");
     setSelection({ type, providerId: focusProvider.id });
-  }, [focusProvider, oauthProviders, apiKeyProviders]);
+  }, [focusProvider, oauthProviders, oauthLoaded, apiKeyProviders]);
 
   useEffect(() => {
     try {

@@ -99,6 +99,7 @@ function IconAction({ label, busy, active, onClick, children }: { label: string;
     <Tooltip content={label} side="top">
       <button
         type="button"
+        className="provider-usage-action-btn"
         disabled={busy}
         onClick={onClick}
         aria-label={label}
@@ -136,7 +137,7 @@ function AccountDetail({ account, label, defaultLimit, busy, onChange, onOpenPro
               {bucket.label ?? t("appShell.allModels")}
             </span>
           )}
-          <DetailMeters windows={bucket} limit={limit} t={t} />
+          <DetailMeters windows={bucket} limit={limit ?? defaultLimit} t={t} />
         </div>
       ))}
       {account.paused && (
@@ -198,27 +199,47 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
   }, [refreshDone]);
   // A dropped order shows at once and stays until the server's next snapshot carries it.
   const [localOrder, setLocalOrder] = useState<string[] | null>(null);
-  useEffect(() => setLocalOrder(null), [snapshot]);
+  const orderQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const orderVersionRef = useRef(0);
+  const orderPendingRef = useRef(0);
+  useEffect(() => {
+    if (orderPendingRef.current === 0) setLocalOrder(null);
+  }, [snapshot]);
   const accounts = localOrder
     ? [...(snapshot?.accounts ?? [])].sort((a, b) => localOrder.indexOf(a.key) - localOrder.indexOf(b.key))
     : snapshot?.accounts ?? [];
+  const defaultLimit = snapshot?.defaultLimitPercent ?? 90;
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropKey, setDropKey] = useState<string | null>(null);
   const moveAccount = (from: string, to: string) => {
     const order = accounts.map((account) => account.key).filter((key) => key !== from);
-    order.splice(accounts.findIndex((account) => account.key === to), 0, from);
+    const targetIndex = accounts.findIndex((account) => account.key === to);
+    if (targetIndex === -1) return;
+    order.splice(targetIndex, 0, from);
     setLocalOrder(order);
-    void fetch("/api/provider-usage/accounts", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ order }),
-    }).then((response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return reload();
-    }).catch((cause: unknown) => {
-      setLocalOrder(null);
-      toast.error(t("providerUsage.reorderFailed", { error: cause instanceof Error ? cause.message : String(cause) }));
-    });
+    const version = ++orderVersionRef.current;
+    orderPendingRef.current += 1;
+    orderQueueRef.current = orderQueueRef.current
+      .catch(() => {})
+      .then(async () => {
+        const response = await fetch("/api/provider-usage/accounts", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ order }),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (version === orderVersionRef.current) await reload();
+      })
+      .catch((cause: unknown) => {
+        if (version === orderVersionRef.current) {
+          setLocalOrder(null);
+          toast.error(t("providerUsage.reorderFailed", { error: cause instanceof Error ? cause.message : String(cause) }));
+        }
+      })
+      .finally(() => {
+        orderPendingRef.current = Math.max(0, orderPendingRef.current - 1);
+        if (orderPendingRef.current === 0 && version === orderVersionRef.current) setLocalOrder(null);
+      });
   };
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -323,145 +344,170 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
           </SidebarIconButton>
         </Tooltip>
       </div>
-      {!collapsed && accounts.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 2, minHeight: 0, overflowY: "auto" }}>
-          {accounts.map((account, index) => {
-            const defaultLabel = account.accountLabel ?? t("appShell.account", { number: account.accountIndex ?? index + 1 });
-            const label = account.name ?? defaultLabel;
-            const { key } = account;
-            const expanded = expandedKey === key;
-            const editing = editingKey === key;
-            const hasWindows = WINDOWS.some(({ key: windowKey }) => account[windowKey]);
-            const finishRename = (value: string | null) => {
-              setEditingKey(null);
-              if (value !== null && value.trim() !== (account.name ?? "")) void update(account, label, { name: value.trim() || null });
-            };
-            const rowStyle = { display: "flex", flexDirection: "column", gap: 4, width: "100%", boxSizing: "border-box", padding: "5px 6px", background: "none", border: "none", cursor: "pointer", textAlign: "left", minWidth: 0 } as const;
-            const content = (
-              <>
-                <span style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", minWidth: 0, opacity: account.paused ? 0.55 : 1 }}>
-                  <ChevronRight
-                    size={11}
-                    strokeWidth={2}
-                    aria-hidden="true"
-                    style={{ flexShrink: 0, color: "var(--text-dim)", transform: expanded ? "rotate(90deg)" : "none", transition: "transform var(--dur-med) var(--ease-out-warm)" }}
-                  />
-                  <span style={{ ...chipStyle, color: "var(--text)", background: "var(--bg)" }}>{account.provider}</span>
-                  {editing ? (
-                    <input
-                      autoFocus
-                      defaultValue={account.name ?? ""}
-                      placeholder={defaultLabel}
-                      maxLength={80}
-                      aria-label={t("providerUsage.nameFor", { account: defaultLabel })}
-                      onBlur={(event) => finishRename(event.currentTarget.dataset.cancelled ? null : event.currentTarget.value)}
-                      onClick={(event) => event.stopPropagation()}
-                      onKeyDown={(event) => {
-                        event.stopPropagation();
-                        if (event.key === "Escape") event.currentTarget.dataset.cancelled = "true";
-                        if (event.key === "Enter" || event.key === "Escape") event.currentTarget.blur();
-                      }}
-                      style={{ flex: 1, minWidth: 0, height: 20, boxSizing: "border-box", padding: "0 5px", background: "var(--bg)", border: "1px solid var(--accent)", borderRadius: 4, color: "var(--text)", font: "inherit", fontSize: 11 }}
-                    />
-                  ) : (
-                    <span style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-                      {label}
+      {accounts.length > 0 && (
+        <div className={`accordion-flow${!collapsed ? " is-open" : ""}`} aria-hidden={collapsed} inert={collapsed} style={{ minHeight: 0, flexShrink: 1 }}>
+          <div className="accordion-flow-inner" style={{ display: "flex", flexDirection: "column", maxHeight: "calc(40vh - 44px)" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, minHeight: 0, overflowY: "auto" }}>
+              {accounts.map((account, index) => {
+                const defaultLabel = account.accountLabel ?? t("appShell.account", { number: account.accountIndex ?? index + 1 });
+                const label = account.name ?? defaultLabel;
+                const { key } = account;
+                const expanded = expandedKey === key;
+                const editing = editingKey === key;
+                const preferred = (account.priority ?? 0) > 0;
+                const nonDefaultLimit = account.limitPercent !== undefined && account.limitPercent !== defaultLimit ? account.limitPercent : undefined;
+                const hasBadges = nonDefaultLimit !== undefined || preferred || !!account.paused;
+                const hasWindows = WINDOWS.some(({ key: windowKey }) => account[windowKey]);
+                const finishRename = (value: string | null) => {
+                  setEditingKey(null);
+                  if (value !== null && value.trim() !== (account.name ?? "")) void update(account, label, { name: value.trim() || null });
+                };
+                const rowStyle = { display: "flex", flexDirection: "column", width: "100%", boxSizing: "border-box", padding: "5px 6px", background: "none", border: "none", cursor: "pointer", textAlign: "left", minWidth: 0 } as const;
+                const content = (
+                  <>
+                    <span style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", minWidth: 0, opacity: account.paused ? 0.55 : 1 }}>
+                      <ChevronRight
+                        size={11}
+                        strokeWidth={2}
+                        aria-hidden="true"
+                        style={{ flexShrink: 0, color: "var(--text-dim)", transform: expanded ? "rotate(90deg)" : "none", transition: "transform var(--dur-med) var(--ease-out-warm)" }}
+                      />
+                      <span style={{ ...chipStyle, color: "var(--text)", background: "var(--bg)" }}>{account.provider}</span>
+                      {editing ? (
+                        <input
+                          autoFocus
+                          defaultValue={account.name ?? ""}
+                          placeholder={defaultLabel}
+                          maxLength={80}
+                          aria-label={t("providerUsage.nameFor", { account: defaultLabel })}
+                          onBlur={(event) => finishRename(event.currentTarget.dataset.cancelled ? null : event.currentTarget.value)}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => {
+                            event.stopPropagation();
+                            if (event.key === "Escape") event.currentTarget.dataset.cancelled = "true";
+                            if (event.key === "Enter" || event.key === "Escape") event.currentTarget.blur();
+                          }}
+                          style={{ flex: 1, minWidth: 0, height: 20, boxSizing: "border-box", padding: "0 5px", background: "var(--bg)", border: "1px solid var(--accent)", borderRadius: 4, color: "var(--text)", font: "inherit", fontSize: 11 }}
+                        />
+                      ) : (
+                        <span style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+                          {label}
+                        </span>
+                      )}
+                      {hasBadges && (
+                        <span className={`provider-usage-badges${expanded ? " is-hidden" : ""}`} aria-hidden={expanded}>
+                          {nonDefaultLimit !== undefined && (
+                            <span style={{ ...chipStyle, color: "var(--text-muted)", background: "var(--bg-subtle)" }}>
+                              ≤{nonDefaultLimit}%
+                            </span>
+                          )}
+                          {preferred && (
+                            <Star size={11} fill="currentColor" aria-label={t("providerUsage.preferred")} style={{ flexShrink: 0, color: "var(--accent)" }} />
+                          )}
+                          {account.paused && (
+                            <Pause size={11} strokeWidth={2.2} aria-label={t("providerUsage.paused")} style={{ flexShrink: 0, color: "var(--text-muted)" }} />
+                          )}
+                        </span>
+                      )}
                     </span>
-                  )}
-                  {(account.priority ?? 0) > 0 && (
-                    <Star size={11} fill="currentColor" aria-label={t("providerUsage.preferred")} style={{ flexShrink: 0, color: "var(--accent)" }} />
-                  )}
-                  {account.paused ? (
-                    <span style={{ ...chipStyle, color: "var(--text-muted)", background: "var(--bg-subtle)" }}>{t("providerUsage.paused")}</span>
-                  ) : account.limitPercent !== undefined ? (
-                    <span style={{ ...chipStyle, color: "var(--text-muted)", background: "var(--bg-subtle)" }}>
-                      ≤{account.limitPercent}%
-                    </span>
-                  ) : null}
-                </span>
-                {/* An open row lists the same quotas with names and resets below. */}
-                {!account.paused && !expanded && (
-                  <span style={{ display: "flex", flexDirection: "column", gap: 3, width: "100%", paddingLeft: 17, boxSizing: "border-box" }}>
-                    {hasWindows ? (
-                      // Each bucket is its own quota (Gemini vs Argon, shared vs Fable): one unlabelled line each.
-                      (account.buckets ?? [account]).map((bucket, bucketIndex) => (
-                        <WindowMeters key={bucketIndex} windows={bucket} slots={WINDOWS.flatMap(({ key: windowKey }) => (account[windowKey] ? [windowKey] : []))} limit={account.limitPercent} />
-                      ))
-                    ) : (
-                      <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{t("appShell.providerUsageNoData")}</span>
+                    {/* An open row lists the same quotas with names, resets and interactive buttons below. */}
+                    {!account.paused && (
+                      <div className={`accordion-flow${!expanded ? " is-open" : ""}`} aria-hidden={expanded} style={{ width: "100%" }}>
+                        <div className="accordion-flow-inner">
+                          <span style={{ display: "flex", flexDirection: "column", gap: 3, width: "100%", paddingTop: 4, paddingLeft: 17, boxSizing: "border-box" }}>
+                            {hasWindows ? (
+                              // Each bucket is its own quota (Gemini vs Argon, shared vs Fable): one unlabelled line each.
+                              (account.buckets ?? [account]).map((bucket, bucketIndex) => (
+                                <WindowMeters key={bucketIndex} windows={bucket} slots={WINDOWS.flatMap(({ key: windowKey }) => (account[windowKey] ? [windowKey] : []))} limit={account.limitPercent ?? defaultLimit} />
+                              ))
+                            ) : (
+                              <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{t("appShell.providerUsageNoData")}</span>
+                            )}
+                          </span>
+                        </div>
+                      </div>
                     )}
-                  </span>
-                )}
-              </>
-            );
-            return (
-              <div
-                key={key}
-                draggable={!editing}
-                onDragStart={(event) => { event.dataTransfer.setData("text/plain", key); event.dataTransfer.effectAllowed = "move"; setDragKey(key); }}
-                onDragOver={(event) => {
-                  if (!dragKey || dragKey === key) return;
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "move";
-                  setDropKey(key);
-                }}
-                onDragLeave={() => setDropKey((current) => (current === key ? null : current))}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  if (dragKey && dragKey !== key) moveAccount(dragKey, key);
-                  setDragKey(null);
-                  setDropKey(null);
-                }}
-                onDragEnd={() => { setDragKey(null); setDropKey(null); }}
-                style={{
-                  borderRadius: "var(--radius-control)",
-                  background: expanded ? "var(--bg-subtle)" : "transparent",
-                  opacity: dragKey === key ? 0.5 : 1,
-                  ...(dropKey === key ? { outline: "1px solid var(--accent)", outlineOffset: -1 } : {}),
-                }}
-              >
-                {/* A div, not a button: the rename input sits inside the row. */}
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className="provider-usage-row"
-                  onClick={(event) => {
-                    // Expanding moves the row up (the panel grows from the bottom), so wait out a double-click.
-                    window.clearTimeout(clickTimer.current);
-                    if (!editing && event.detail <= 1) clickTimer.current = window.setTimeout(() => setExpandedKey((prev) => (prev === key ? null : key)), 220);
-                  }}
-                  onDoubleClick={() => {
-                    window.clearTimeout(clickTimer.current);
-                    setEditingKey(key);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.target !== event.currentTarget) return;
-                    if (event.key === "Enter" || event.key === " ") {
+                  </>
+                );
+                return (
+                  <div
+                    key={key}
+                    className="provider-usage-card"
+                    draggable={!editing}
+                    onDragStart={(event) => { event.dataTransfer.setData("text/plain", key); event.dataTransfer.effectAllowed = "move"; setDragKey(key); }}
+                    onDragOver={(event) => {
+                      if (!dragKey || dragKey === key) return;
                       event.preventDefault();
-                      setExpandedKey((prev) => (prev === key ? null : key));
-                    }
-                    if (event.key === "F2") setEditingKey(key);
-                  }}
-                  aria-expanded={expanded}
-                  title={[account.name && defaultLabel, account.plan, t("providerUsage.renameHint")].filter(Boolean).join(" · ")}
-                  style={{ ...rowStyle, cursor: editing ? "default" : "pointer" }}
-                >
-                  {content}
-                </div>
-                {expanded && (
-                  <AccountDetail
-                    account={account}
-                    label={label}
-                    defaultLimit={snapshot?.defaultLimitPercent ?? 90}
-                    busy={busyKey === key}
-                    onChange={(change) => void update(account, label, change)}
-                    onOpenProvider={onOpenProvider}
-                    t={t}
-                  />
-                )}
-              </div>
-            );
-          })}
+                      event.dataTransfer.dropEffect = "move";
+                      setDropKey(key);
+                    }}
+                    onDragLeave={() => setDropKey((current) => (current === key ? null : current))}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (dragKey && dragKey !== key) moveAccount(dragKey, key);
+                      setDragKey(null);
+                      setDropKey(null);
+                    }}
+                    onDragEnd={() => { setDragKey(null); setDropKey(null); }}
+                    style={{
+                      borderRadius: "var(--radius-control)",
+                      background: expanded ? "var(--bg-subtle)" : "transparent",
+                      opacity: dragKey === key ? 0.5 : 1,
+                      ...(dropKey === key ? { outline: "1px solid var(--accent)", outlineOffset: -1 } : {}),
+                    }}
+                  >
+                    {/* A div, not a button: the rename input sits inside the row. */}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      className="provider-usage-row"
+                      aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown F2"
+                      onClick={(event) => {
+                        // Expanding moves the row up (the panel grows from the bottom), so wait out a double-click.
+                        window.clearTimeout(clickTimer.current);
+                        if (!editing && event.detail <= 1) clickTimer.current = window.setTimeout(() => setExpandedKey((prev) => (prev === key ? null : key)), 220);
+                      }}
+                      onDoubleClick={() => {
+                        window.clearTimeout(clickTimer.current);
+                        setEditingKey(key);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setExpandedKey((prev) => (prev === key ? null : key));
+                        } else if (event.key === "F2") {
+                          setEditingKey(key);
+                        } else if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+                          event.preventDefault();
+                          const target = accounts[index + (event.key === "ArrowUp" ? -1 : 1)];
+                          if (target) moveAccount(key, target.key);
+                        }
+                      }}
+                      aria-expanded={expanded}
+                      title={[account.name && defaultLabel, account.plan, t("providerUsage.renameHint")].filter(Boolean).join(" · ")}
+                      style={{ ...rowStyle, cursor: editing ? "default" : "pointer" }}
+                    >
+                      {content}
+                    </div>
+                    <div className={`accordion-flow${expanded ? " is-open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
+                      <div className="accordion-flow-inner">
+                        <AccountDetail
+                          account={account}
+                          label={label}
+                          defaultLimit={defaultLimit}
+                          busy={busyKey === key}
+                          onChange={(change) => void update(account, label, change)}
+                          onOpenProvider={onOpenProvider}
+                          t={t}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
     </section>

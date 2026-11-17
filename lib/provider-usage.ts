@@ -35,7 +35,13 @@ type CachedUsage = { expiresAt: number; output: string };
 let usageCache: CachedUsage | undefined;
 let usageInFlight: Promise<string> | undefined;
 let usageInFlightForced = false;
+let usageGeneration = 0;
 
+export function invalidateUsageCache(): void {
+  usageGeneration += 1;
+  usageCache = undefined;
+  usageInFlight = undefined;
+}
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -314,11 +320,14 @@ export function parseProviderUsageAccounts(
     // A report fetched before its account was paused: the paused row below stands for it.
     if (active.length === 0 && matches.length > 0) continue;
     const activeAccounts = providerAccounts.filter((account) => !account.paused);
-    // Copilot credentials carry no identity: a provider's only account is its only report.
+    const hasIdentity = (id: AccountIdentity) => !!(id.email || id.accountId || id.projectId || id.orgId);
+    const singleReport = entries.filter((other) => other.provider === entry.provider).length === 1;
+    const soleActive = activeAccounts.length === 1 ? activeAccounts[0] : undefined;
+    // Copilot credentials carry no identity: fall back only when at least one side lacks identity, never on conflict.
     const match = active.length === 1
       ? active[0]
-      : active.length === 0 && activeAccounts.length === 1 && entries.filter((other) => other.provider === entry.provider).length === 1
-        ? activeAccounts[0]
+      : active.length === 0 && singleReport && soleActive && (!hasIdentity(entry.identity) || !hasIdentity(soleActive))
+        ? soleActive
         : undefined;
     const account = mergeAccount(entry.splits, entry.provider, entry.index);
     if (match && !claimed.has(match.credentialId)) {
@@ -336,6 +345,7 @@ export function parseProviderUsageAccounts(
       ...(paused.email ? { accountLabel: paused.email } : { accountIndex: entries.length + offset + 1 }),
       credentialId: paused.credentialId,
       paused: true,
+      canPrioritize: canNameAccount(paused),
       ...policyFields(policies, paused.provider, paused),
     });
   }
@@ -398,14 +408,20 @@ function getUsageOutput(refresh = false): Promise<string> {
       ? usageInFlight.then(() => getUsageOutput(true), () => getUsageOutput(true))
       : usageInFlight;
   }
+  const generation = usageGeneration;
   usageInFlightForced = refresh;
-  usageInFlight = fetchProviderUsage(refresh)
+  const pending = fetchProviderUsage(refresh)
     .then((output) => {
-      usageCache = { output, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
+      if (generation === usageGeneration) {
+        usageCache = { output, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
+      }
       return output;
     })
-    .finally(() => { usageInFlight = undefined; });
-  return usageInFlight;
+    .finally(() => {
+      if (usageInFlight === pending) usageInFlight = undefined;
+    });
+  usageInFlight = pending;
+  return pending;
 }
 
 export async function getProviderUsage(query: UsageQuery = {}, refresh = false): Promise<ProviderUsageSnapshot> {
@@ -447,9 +463,10 @@ export async function updateProviderUsageAccount(
     const account = siblings.find((candidate) => candidate.credentialId === credentialId);
     if (!account) throw new Error(`No stored ${provider} account ${credentialId}`);
     if (!canNameAccount(account)) throw new Error("omp cannot name this account in a policy: it has no email, account or project id");
-    let policies = readAccountPolicyConfig().policies;
+    const { policies: initialPolicies, reservePct } = readAccountPolicyConfig();
+    let policies = initialPolicies;
     if (change.limitPercent !== undefined) {
-      policies = withAccountPolicy(policies, provider, account, siblings, "reservePct", change.limitPercent === null ? null : 100 - change.limitPercent);
+      policies = withAccountPolicy(policies, provider, account, siblings, "reservePct", change.limitPercent === null ? null : 100 - change.limitPercent, reservePct);
     }
     if (change.priority !== undefined) policies = withAccountPolicy(policies, provider, account, siblings, "priority", change.priority);
     writeAccountPolicies(policies);
@@ -458,5 +475,5 @@ export async function updateProviderUsageAccount(
     await runUtilityCommand({ type: "set_account_paused", providerId: provider, credentialId, paused: change.paused }, 120_000);
   }
   // The cached report still lists a paused account as active and lacks a resumed one.
-  usageCache = undefined;
+  invalidateUsageCache();
 }

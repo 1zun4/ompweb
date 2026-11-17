@@ -288,7 +288,7 @@
   "providerUsage.limitFor": "{account} 的用量上限",
   "providerUsage.limitDefault": "≤{percent}%（預設）",
   "providerUsage.nameFor": "{account} 的名稱",
-  "providerUsage.renameHint": "按兩下名稱即可重新命名，拖曳可調整順序",
+  "providerUsage.renameHint": "按兩下名稱即可重新命名，拖曳或按 Alt+↑/↓ 可調整順序",
   "providerUsage.paused": "已暫停",
   "providerUsage.pausedHint": "仍保持登入。恢復之前 omp 不會使用此帳戶。",
   "providerUsage.preferred": "優先",

@@ -52,6 +52,20 @@ test("manual refresh gets fresh limits on older browsers while automatic polling
       assert.equal(await queuedRefresh, true);
     });
     assert.equal(result.current.snapshot.reports[0].fiveHour.percent, 95, "manual refresh during a background poll must still fetch fresh limits");
+    // A reload() after a mutation must not settle on a pre-update GET that is still in flight.
+    cachedPercent = 40;
+    finishPoll = {};
+    act(() => poll());
+    cachedPercent = 65;
+    let reloaded;
+    act(() => { reloaded = result.current.reload(); });
+    await act(async () => {
+      const resolve = finishPoll.resolve;
+      finishPoll = undefined;
+      resolve();
+      assert.equal(await reloaded, true);
+    });
+    assert.equal(result.current.snapshot.reports[0].fiveHour.percent, 65, "reload during an in-flight GET must issue a post-mutation non-forced GET");
     finishPoll = {};
     let cancelled;
     act(() => { cancelled = result.current.refresh(); });
