@@ -288,7 +288,7 @@
   "providerUsage.limitFor": "Usage limit for {account}",
   "providerUsage.limitDefault": "≤{percent}% (default)",
   "providerUsage.nameFor": "Name for {account}",
-  "providerUsage.renameHint": "double-click the name to rename, drag to reorder",
+  "providerUsage.renameHint": "double-click the name to rename, drag or Alt+↑/↓ to reorder",
   "providerUsage.paused": "Paused",
   "providerUsage.pausedHint": "Still signed in. omp skips this account until you resume it.",
   "providerUsage.preferred": "Preferred",

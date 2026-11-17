@@ -277,7 +277,7 @@
   "providerUsage.limitFor": "{account} の使用量の上限",
   "providerUsage.limitDefault": "≤{percent}% (既定)",
   "providerUsage.nameFor": "{account} の名前",
-  "providerUsage.renameHint": "名前をダブルクリックして変更、ドラッグで並べ替え",
+  "providerUsage.renameHint": "名前をダブルクリックして変更、ドラッグまたは Alt+↑/↓ で並べ替え",
   "providerUsage.paused": "一時停止中",
   "providerUsage.pausedHint": "サインインしたままです。再開するまで omp はこのアカウントを使いません。",
   "providerUsage.preferred": "優先",

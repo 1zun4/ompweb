@@ -125,10 +125,17 @@ export function withAccountPolicy(
   siblings: readonly AccountIdentity[],
   field: PolicyField,
   value: number | null,
+  defaultReservePct = 10,
 ): unknown[] {
   const next = [...policies];
   const index = findPolicy(next, provider, account);
   const existing = index === -1 ? undefined : next[index] as Record<string, unknown>;
+  if (field === "reservePct" && typeof existing?.reclaimAbovePct === "number") {
+    const effectiveReserve = value ?? defaultReservePct;
+    if (existing.reclaimAbovePct <= effectiveReserve) {
+      throw new Error(`The account's reclaimAbovePct (${existing.reclaimAbovePct}%) must stay above its reserve (${effectiveReserve}%); use a higher limit`);
+    }
+  }
   if (value === null) {
     if (!existing) return next;
     const rest = { ...existing };
@@ -136,9 +143,6 @@ export function withAccountPolicy(
     if (Object.keys(rest).every((key) => key === "provider" || key === "account")) next.splice(index, 1);
     else next[index] = rest;
     return next;
-  }
-  if (field === "reservePct" && typeof existing?.reclaimAbovePct === "number" && existing.reclaimAbovePct <= value) {
-    throw new Error(`The account's reclaimAbovePct (${existing.reclaimAbovePct}%) must stay above its reserve; use a higher limit`);
   }
   if (existing) next[index] = { ...existing, [field]: value };
   else next.push({ provider, account: policySelector(account, siblings), [field]: value });

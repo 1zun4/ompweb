@@ -58,9 +58,9 @@ export function useProviderUsage<T = ProviderUsageSnapshot>(
   path = "/api/provider-usage",
 ): ProviderUsageState<T> & { refresh: () => Promise<boolean>; reload: () => Promise<boolean> } {
   const [state, setState] = useState<ProviderUsageState<T>>({ snapshot: null, loading: false, error: false });
-  const refreshRef = useRef<(force: boolean) => Promise<boolean>>(async () => false);
-  const refresh = useCallback(() => refreshRef.current(true), []);
-  const reload = useCallback(() => refreshRef.current(false), []);
+  const refreshRef = useRef<(mode: "poll" | "reload" | "force") => Promise<boolean>>(async () => false);
+  const refresh = useCallback(() => refreshRef.current("force"), []);
+  const reload = useCallback(() => refreshRef.current("reload"), []);
   useEffect(() => {
     if (query === null) {
       setState({ snapshot: null, loading: false, error: false });
@@ -70,11 +70,14 @@ export function useProviderUsage<T = ProviderUsageSnapshot>(
     setState({ snapshot: null, loading: true, error: false });
     let inFlight: Promise<boolean> | undefined;
     let inFlightForced = false;
-    const load = (force = false): Promise<boolean> => {
+    const load = (mode: "poll" | "reload" | "force" = "poll"): Promise<boolean> => {
       if (controller.signal.aborted) return Promise.resolve(false);
       if (inFlight) {
-        return force && !inFlightForced ? inFlight.then(() => load(true)) : inFlight;
+        if (mode === "force" && !inFlightForced) return inFlight.then(() => load("force"));
+        if (mode === "reload") return inFlight.then(() => load("poll"));
+        return inFlight;
       }
+      const force = mode === "force";
       if (force) setState((previous) => ({ ...previous, loading: true, error: false }));
       const params = new URLSearchParams(query);
       if (force) params.set("refresh", "true");
