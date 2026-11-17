@@ -1,97 +1,58 @@
 #!/usr/bin/env bun
-/**
- * Puts the omp npm packages the runner compiles against into `vendor/`: the `omp-packages-<version>.zip` asset of
- * one `ompweb-dev/oh-my-pi` integration release, which `omp-build.json` pins.
- *
- * `bun scripts/use-omp-build.ts`: fetch the pinned release's packages (then `bun install --frozen-lockfile`).
- * `bun scripts/use-omp-build.ts <tag>`: re-pin to that release: fetch it, point `omp-build.json`, the `@oh-my-pi/*`
- * dependencies and an override for every package and native leaf at it, and `bun install` (updates `bun.lock`).
- * `OMP_BUILD_RELEASES` replaces `https://github.com` as the download host, e.g. a local mirror for testing.
- */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-interface Pin {
-	repo: string;
-	tag: string;
-}
-
 const runnerDir = path.resolve(import.meta.dir, "..");
-const vendorDir = path.join(runnerDir, "vendor");
 const pinPath = path.join(runnerDir, "omp-build.json");
-const manifestPath = path.join(runnerDir, "package.json");
-const TAG = /^v\d+\.\d+\.\d+-int\.\d{12}\.g[0-9a-f]{7}$/;
-// Without an override per leaf, bun installs upstream's npm leaf instead and the runner embeds upstream's addon.
-const LEAVES = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64"].map(
-	target => `@oh-my-pi/pi-natives-${target}`,
-);
-
-function run(cmd: string[]): void {
-	const { exitCode } = Bun.spawnSync(cmd, { cwd: runnerDir, stdio: ["ignore", "inherit", "inherit"] });
-	if (exitCode !== 0) throw new Error(`${cmd.join(" ")} exited with ${exitCode}`);
+const pin = await Bun.file(pinPath).json();
+const commit = process.argv[2] ?? pin.commit;
+if (pin.repo !== "can1357/oh-my-pi" || !/^[0-9a-f]{40}$/.test(commit ?? "")) {
+	throw new Error("omp-build.json must pin can1357/oh-my-pi to a full commit SHA");
+}
+const sourceDir = path.join(runnerDir, "vendor", "omp");
+function run(cmd: string[], cwd: string): string {
+	const result = Bun.spawnSync(cmd, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+	if (result.exitCode !== 0) throw new Error(`${cmd.join(" ")}: ${result.stderr.toString()}`);
+	return result.stdout.toString().trim();
 }
 
-/** Replaces `vendor/` with the release's zip contents once they hold every `required` package; returns its
- * `index.json` (npm name → tarball file). A failed fetch or check leaves `vendor/` as it was. */
-async function fetchBuild({ repo, tag }: Pin, required: string[] = []): Promise<Record<string, string>> {
-	if (!TAG.test(tag)) throw new Error(`${tag} is not an integration release tag (v<version>-int.<stamp>.g<sha7>)`);
-	const url = `${process.env.OMP_BUILD_RELEASES ?? "https://github.com"}/${repo}/releases/download/${tag}/omp-packages-${tag.slice(1)}.zip`;
-	// One retry: a dropped connection should not fail a release build.
-	let response = await fetch(url).catch(() => undefined);
-	if (!response?.ok) response = await fetch(url);
-	if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-	const staging = `${vendorDir}.new`;
+function patchSource(cwd: string): void {
+	for (const name of ["session-host", "chunk-paths"]) {
+		const patch = path.join(runnerDir, "patches", `${name}.patch`);
+		const applied = Bun.spawnSync(["git", "apply", "--recount", "--reverse", "--check", patch], {
+			cwd, stdio: ["ignore", "pipe", "pipe"],
+		});
+		if (applied.exitCode === 0) continue;
+		run(["git", "apply", "--recount", "--check", patch], cwd);
+		run(["git", "apply", "--recount", patch], cwd);
+	}
+}
+
+await fs.mkdir(path.dirname(sourceDir), { recursive: true });
+const installed = await fs.access(path.join(sourceDir, ".git")).then(() => true, () => false);
+if (!installed || run(["git", "rev-parse", "HEAD"], sourceDir) !== commit) {
+	const staging = `${sourceDir}.new`;
 	await fs.rm(staging, { recursive: true, force: true });
 	await fs.mkdir(staging);
-	const zip = path.join(staging, "omp-packages.zip");
-	await Bun.write(zip, response);
-	// PATH can select Git Bash's GNU tar, which neither reads zip nor treats drive letters as local paths.
-	if (process.platform === "win32") {
-		const systemRoot = process.env.SystemRoot;
-		if (!systemRoot || !path.isAbsolute(systemRoot)) throw new Error("SystemRoot must identify the Windows directory");
-		run([path.join(systemRoot, "System32", "tar.exe"), "-xf", zip, "-C", staging]);
-	} else {
-		run(["unzip", "-q", zip, "-d", staging]);
+	try {
+		run(["git", "init", "--quiet"], staging);
+		run(["git", "fetch", "--depth=1", `https://github.com/${pin.repo}.git`, commit], staging);
+		run(["git", "checkout", "--detach", "FETCH_HEAD"], staging);
+		if (run(["git", "rev-parse", "HEAD"], staging) !== commit) throw new Error("OMP checkout does not match its pin");
+		patchSource(staging);
+		run([process.execPath, "install", "--frozen-lockfile"], staging);
+		await fs.rm(sourceDir, { recursive: true, force: true });
+		await fs.rename(staging, sourceDir);
+	} finally {
+		await fs.rm(staging, { recursive: true, force: true });
 	}
-	await fs.rm(zip);
-	const index: Record<string, string> = await Bun.file(path.join(staging, "index.json")).json();
-	for (const [name, file] of Object.entries(index)) {
-		if (!/^[\w.-]+\.tgz$/.test(file)) throw new Error(`index.json: bad file ${file} for ${name}`);
-	}
-	const missing = required.filter(name => !index[name]);
-	if (missing.length > 0) throw new Error(`${tag} has no package for ${missing.join(", ")}`);
-	await fs.rm(vendorDir, { recursive: true, force: true });
-	await fs.rename(staging, vendorDir);
-	console.log(`omp packages: ${repo} ${tag} (${Object.keys(index).length} tarballs)`);
-	return index;
-}
-
-const tag = process.argv[2];
-if (!tag) {
-	const pin: Pin = await Bun.file(pinPath)
-		.json()
-		.catch(error => {
-			throw new Error(`${pinPath} is unreadable; pin a release with \`bun scripts/use-omp-build.ts <tag>\``, {
-				cause: error,
-			});
-		});
-	await fetchBuild(pin);
 } else {
-	const pin: Pin = { repo: "ompweb-dev/oh-my-pi", tag };
-	const manifest = await Bun.file(manifestPath).json();
-	const direct = Object.keys(manifest.dependencies).filter(name => name.startsWith("@oh-my-pi/"));
-	const index = await fetchBuild(pin, [...direct, ...LEAVES]);
-	const file = (name: string): string => `file:./vendor/${index[name]}`;
-	for (const name of direct) manifest.dependencies[name] = file(name);
-	// Replaced, not merged: a package the new release dropped must not keep pointing at a tarball that is gone.
-	manifest.overrides = Object.fromEntries(Object.keys(index).map(name => [name, file(name)]));
-	delete manifest.patchedDependencies;
-	await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-	await Bun.write(pinPath, `${JSON.stringify(pin, null, 2)}\n`);
-	// --force: unstamped tarballs keep their file name across builds (`…pi-coding-agent-18.20.0.tgz`), and without it
-	// bun keeps the old build's integrity for them, so the next `--frozen-lockfile` install fails its check.
-	run([process.execPath, "install", "--force"]);
-	// Any `@oh-my-pi/*` resolved from npm instead of vendor/ is a package the release lacks.
-	const fromNpm = (await Bun.file(path.join(runnerDir, "bun.lock")).text()).match(/\["@oh-my-pi\/[^"]+@(?!\.\/vendor\/)[^"]*"/g);
-	if (fromNpm) throw new Error(`bun.lock resolves these from npm, not ${tag}: ${fromNpm.map(entry => entry.slice(2, -1)).join(", ")}`);
+	patchSource(sourceDir);
+	run([process.execPath, "install", "--frozen-lockfile"], sourceDir);
 }
+// One workspace dependency graph keeps every @oh-my-pi import on the pinned source.
+const modules = path.join(runnerDir, "node_modules");
+await fs.rm(modules, { recursive: true, force: true });
+await fs.symlink(path.join(sourceDir, "node_modules"), modules, process.platform === "win32" ? "junction" : "dir");
+if (process.argv[2]) await Bun.write(pinPath, `${JSON.stringify({ repo: pin.repo, commit }, null, 2)}\n`);
+console.log(`OMP_COMMIT=${commit}`);

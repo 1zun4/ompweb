@@ -26,6 +26,10 @@ jobs:
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+      BUN_JSC_forceRAMSize: "4294967296"
     defaults:
       run:
         shell: bash
@@ -51,7 +55,6 @@ jobs:
         run: |
           npm ci
           npx bun runner/scripts/use-omp-build.ts
-          npx bun install --cwd runner --frozen-lockfile
 
       - name: TypeScript typecheck
         run: npm run typecheck
@@ -166,6 +169,7 @@ jobs:
     name: PR Rules & Quality Gates
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

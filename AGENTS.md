@@ -12,12 +12,16 @@ npm run build:binary [-- --target bun-<os>-<arch>]   # build, then compile relea
 npm run typecheck && npm run lint
 ```
 
-The dev server needs ompweb's omp build (`runner/`). Fetch the pinned omp packages first, then install
-(`npm test` needs this too):
-`bun runner/scripts/use-omp-build.ts && cd runner && bun install --frozen-lockfile`; then build
+The dev server uses OMP main source pinned by commit in `runner/omp-build.json`.
+Run `bun runner/scripts/use-omp-build.ts` to fetch it and link its workspace dependencies
+(no separate install in `runner/`). Then build
 `runner/release/ompweb-omp-<os>-<arch>` (`bun runner/scripts/build-binary.ts`, this machine's target), which a source checkout
 finds by itself, or point `OMP_WEB_OMP_BIN` at it or at a wrapper running `bun runner/src/cli.ts`.
 All live-agent features go through it; session browsing works without it.
+The build also produces standalone `omp-<os>-<arch>` from that same commit using OMP's compiler.
+Native addons come from the exact-version official npm leaf packages; missing versions or invalid stamps fail the build.
+`Sync upstream` merges upstream main and updates the OMP commit hourly; pushes need `UPSTREAM_SYNC_TOKEN`
+so Verify PR and the prerelease workflow run. It never deploys running installations.
 
 ---
 
@@ -947,8 +951,10 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   Async restore streams archives with fixed 256 MiB compressed and
   expanded limits, rejecting unsupported IDs before archive consumption.
 - **Not yet remote:** Skills/Plugins/Agents/MCP settings for a host outside the cluster (cluster
-  members run this machine's, see "Cluster configuration"); transcript search reads
-  this machine's files.
+  members run this machine's, see "Cluster configuration").
+- **Transcript search is per host.** `/api/sessions/search` asks each linked daemon to score only
+  its own active conversations, then streams the score maps in sidebar host order. An offline,
+  failing or older daemon contributes no transcript scores; explicit title/name search still works.
 
 #### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
 - **Independent host lifetime.** Installers still install web and host services together; ordinary web restarts leave the daemon's sessions running. Production also starts a missing local host independently through `local-daemon-start.ts`, after preparing its link and probing private control. The singleton prevents duplicates. A coordinated upgrade may restart a shared-installation or incompatible host only after plan approval, with explicit Force approval when sessions may end.

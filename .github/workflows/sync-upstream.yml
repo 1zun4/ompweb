@@ -1,0 +1,48 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.repository == '1zun4/ompweb' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NODE_OPTIONS: --max-old-space-size=256
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+      - name: Merge ompweb and pin OMP main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch https://github.com/ompweb-dev/ompweb.git main
+          git -c core.hooksPath=/dev/null merge --no-edit FETCH_HEAD
+          omp_commit=$(gh api repos/can1357/oh-my-pi/commits/main --jq .sha)
+          [[ "$omp_commit" =~ ^[0-9a-f]{40}$ ]]
+          OMP_COMMIT="$omp_commit" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const file = 'runner/omp-build.json';
+          fs.writeFileSync(file, `${JSON.stringify({repo: 'can1357/oh-my-pi', commit: process.env.OMP_COMMIT}, null, 2)}\n`);
+          NODE
+          git add runner/omp-build.json
+          if ! git diff --cached --quiet; then
+            git -c core.hooksPath=/dev/null commit -m 'chore: update omp main'
+          fi
+          git push origin HEAD:main

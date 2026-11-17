@@ -27,7 +27,7 @@ const CUSTOM_ROWS = 40;
 
 let headless = false;
 let writeChannel: (line: string) => void = () => {};
-let stdin: ReadableStreamDefaultReader<Uint8Array> | undefined;
+let stdin: Parameters<HostChannel["read"]>[0] | undefined;
 
 /** Whether this process is a headless omp (`--headless`). */
 export function isHeadless(): boolean {

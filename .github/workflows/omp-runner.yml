@@ -17,10 +17,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  NODE_OPTIONS: --max-old-space-size=4096
+  BUN_JSC_forceRAMSize: "4294967296"
+
 jobs:
   test:
     name: Typecheck and test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: runner
@@ -33,11 +38,8 @@ jobs:
         with:
           bun-version: 1.4.4
 
-      - name: Fetch the pinned omp packages
+      - name: Prepare pinned OMP main source
         run: bun scripts/use-omp-build.ts
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
 
       - name: Typecheck
         run: bunx tsc -p .
@@ -49,6 +51,7 @@ jobs:
     name: Build (${{ matrix.target }})
     # Bun cross-compiles every target from Linux, as omp's own release does.
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -71,12 +74,9 @@ jobs:
         with:
           bun-version: 1.4.4
 
-      - name: Fetch the pinned omp packages
+      - name: Prepare pinned OMP main source
         run: bun scripts/use-omp-build.ts
 
-      # The host's own addon package is not needed; the target's is what gets embedded.
-      - name: Install dependencies
-        run: bun install --frozen-lockfile --os=${{ matrix.os }} --cpu=${{ matrix.cpu }}
 
       - name: Build binary
         run: bun scripts/build-binary.ts ${{ matrix.target }}

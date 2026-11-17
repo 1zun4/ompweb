@@ -8,6 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
+- Fork builds track upstream ompweb and OMP main hourly. Prereleases include the matching standalone OMP executable and identify its source commit; deployments remain manual.
 - **Usage includes linked hosts.** Settings → Usage now counts the tokens and cost of sessions on every linked host, not only this machine. Each host's daemon reads its own transcripts; the web server keeps a copy, so a host that goes offline keeps its last numbers. A new **Host** breakdown shows each machine's share and when an offline host last synced, and project rows name their host. A host that is still syncing fills in on its own. Refresh reads every host's sessions again, with the prices in that host's `models.yml`. A host on an older ompweb is listed as needing an update.
 - **Move sessions by drag and drop.** Drag a session onto another workspace in the sidebar, on the same host or another one. The session is told where it came from: host, working directory, home directory and operating system. A copy left on another host is archived there.
 - **Provider Usage shows one row per account with every limit window at once.** Splits such as Anthropic's Fable bucket or Antigravity's model quotas merge into their account; open a row for each split's reset time. The 5H/7D switch is gone. Each quota gets its own meter line; drag an account to reorder, double-click it to rename it. An open row sets the account's usage limit (omp's per-account reserve: above it omp uses the provider's other accounts first), marks it preferred (omp's account priority: used first while below its limit), pauses it without signing out, and opens it in API Keys & Providers.
@@ -15,6 +16,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ### Fixed
 
 - **GitHub workflow watches no longer regress to stale run states.** Workflow updates retain GitHub's run timestamp and ignore older snapshots for the same or an earlier attempt, so a delayed `queued` response cannot follow a newer `in_progress` delivery.
+- **Keep sidebar transcript results aligned with expandable hits on every linked host.** Each daemon now searches its own active conversations, ignoring abandoned branches and pre-compaction messages.
 
 ## [v0.7.2] - 2026-11-14
 

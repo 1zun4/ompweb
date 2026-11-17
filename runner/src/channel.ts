@@ -181,7 +181,7 @@ export class HostChannel {
 	}
 
 	/** Read host lines from `input` until it ends, then close the channel. */
-	async read(input: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+	async read(input: { read(): Promise<{ done: boolean; value?: Uint8Array }> }): Promise<void> {
 		const feed = this.#lineReader();
 		const decoder = new TextDecoder();
 		try {

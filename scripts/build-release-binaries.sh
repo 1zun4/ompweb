@@ -8,8 +8,7 @@
 # same bytes), and naming it keeps a later Bun from shipping a -modern one. They keep the plain
 # ompweb-<os>-x64 names.
 set -eu
-# The pinned omp packages, then every platform's native addon package, which the runner embeds per target.
-(cd runner && npx bun scripts/use-omp-build.ts && npx bun install --frozen-lockfile --os='*' --cpu='*' && npx bun scripts/build-binary.ts linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64)
+(cd runner && npx bun scripts/use-omp-build.ts && npx bun scripts/build-binary.ts linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64)
 for target in bun-linux-x64-baseline bun-linux-arm64 bun-darwin-x64-baseline bun-darwin-arm64 bun-windows-x64-baseline; do
 	npx bun scripts/build-binary.ts --target "$target" "$@"
 done

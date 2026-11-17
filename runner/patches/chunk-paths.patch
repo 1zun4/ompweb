@@ -1,0 +1,10 @@
+diff --git a/packages/coding-agent/scripts/compile-binary.ts b/packages/coding-agent/scripts/compile-binary.ts
+--- a/packages/coding-agent/scripts/compile-binary.ts
++++ b/packages/coding-agent/scripts/compile-binary.ts
+@@ -63,4 +63,4 @@
+ 			splitting: true,
+-			// Discovery entry chunks can share a hash; include their source names to avoid collisions.
+-			naming: { chunk: "chunks/[name]-[hash].[ext]" },
++			// Identical type-only modules need their source paths to keep split chunk names unique.
++			naming: { chunk: "chunks/[dir]/[name]-[hash].[ext]" },
+ 			minify: {

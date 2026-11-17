@@ -1104,6 +1104,9 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     case "readMedia":
     case "readSessionPack":
       return value instanceof Uint8Array;
+    case "searchSessions":
+      return isRecord(value) && Object.entries(value).every(([id, score]) =>
+        isValidSessionId(id) && typeof score === "number" && Number.isFinite(score));
     // Main uses these paths (spawn cwd, project keys): they must be strings.
     case "validateCwd":
       return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string" && (value.projectKey === undefined || typeof value.projectKey === "string");
@@ -1241,6 +1244,7 @@ const POOL_PREPARE_TIMEOUT_MS = 10 * 60_000;
 const SESSION_MOVE_TIMEOUT_MS = 6 * 60_000;
 const SLOW_OPS: Partial<Record<keyof SessionOps, number>> = {
   preparePoolProject: POOL_PREPARE_TIMEOUT_MS,
+  searchSessions: 5_000,
   packSession: SESSION_MOVE_TIMEOUT_MS,
   unpackSession: SESSION_MOVE_TIMEOUT_MS,
   finishSessionMove: SESSION_MOVE_TIMEOUT_MS,

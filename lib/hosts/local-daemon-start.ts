@@ -1,9 +1,10 @@
 // Starts this machine's host daemon for the web server unless one already answers its private control endpoint.
 // Pure Node: no Next or `@/` imports (instrumentation.node.ts loads it).
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { isProcessAlive } from "../process-identity";
+import { isProcessAlive, processStartIdentity } from "../process-identity";
 import { isActiveLease, leasePath, readStateJson, statusPath, type StoredStatus } from "../self-update-state";
-import { launchDetachedUpgrade, type UpgradeLaunch } from "../upgrade-process";
+import { launchDetachedUpgrade, stopUpgradeProcess, type UpgradeLaunch } from "../upgrade-process";
 import { requestHostControl, type HostControlStatus } from "./host-control";
 import { ensureLocalHostLink, localLinkUrl } from "./local-bootstrap";
 import { inspectInstalledHostSupervisor, type InstalledHostSupervisor } from "./local-daemon-supervisor";
@@ -53,11 +54,11 @@ async function probe(): Promise<HostControlStatus | null> {
 
 /** This install's host command: the standalone binary's `host`, or the package's entrypoint under the Node runtime. */
 export function localHostLaunch(env: NodeJS.ProcessEnv = process.env): UpgradeLaunch {
-  if (typeof Bun !== "undefined" && Bun.isStandaloneExecutable) return { command: process.execPath, args: ["host"], cwd: process.cwd() };
+  if (typeof Bun !== "undefined" && Bun.isStandaloneExecutable) return { command: process.execPath, args: ["host"], cwd: homedir() };
   const packageDir = env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
   // The daemon is Node-only: a web server running on Bun must start it with the launcher's Node binary.
   const command = env.OMP_WEB_NODE_BIN || (process.versions.bun ? "node" : process.execPath);
-  return { command, args: [join(resolve(packageDir), "bin", "omp-web-host.js")], cwd: process.cwd() };
+  return { command, args: [join(resolve(packageDir), "bin", "omp-web-host.js")], cwd: homedir() };
 }
 
 function daemonEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -125,8 +126,17 @@ async function startLocalHostDaemon({ env = process.env, launch, inspectSupervis
   } catch (error) {
     throw new Error(`Could not start the local host (${plan.command}): ${message(error)}`);
   }
+  const identity = process.platform === "win32" && pid !== undefined ? await processStartIdentity(pid) : null;
   const status = await awaitHost(pid, `${plan.command} ${plan.args.join(" ")}`);
-  // When another starter won the singleton race, its daemon answers and this launch is not the host.
+  // A late Windows launch could claim the pipe after the winner stops unless it is retired before returning.
+  if (process.platform === "win32" && pid !== undefined && status.pid !== pid && isProcessAlive(pid)) {
+    if (!identity) throw new Error(`Could not identify the losing local host launch ${pid}; refusing to stop it`);
+    await stopUpgradeProcess({
+      role: "host", platform: process.platform, pid, identity,
+      executable: plan.command, args: plan.args, installDir: plan.cwd,
+      supervisor: { kind: "foreground" }, current: { pid, identity },
+    });
+  }
   return { started: pid === undefined || status.pid === pid, pid: status.pid };
 }
 

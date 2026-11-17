@@ -1,9 +1,6 @@
 name: Binary prerelease
 
-# Every commit on main that passed Verify PR becomes a GitHub prerelease carrying the five single binaries,
-# titled with the time it was created (2026-11-01T10:30:00Z), tag 20261101T103000Z-<short sha> (git tags
-# cannot hold ":"; the sha keeps parallel runs apart). Prereleases are never "latest", so the in-app update
-# notice and `v*` releases are unaffected.
+# Verified main commits become prereleases; stable releases and update notices are unchanged.
 on:
   workflow_run:
     workflows: [Verify PR]
@@ -24,8 +21,11 @@ jobs:
     # A manual run publishes main only: from another branch it would ship that branch's unverified code.
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      NODE_OPTIONS: --max-old-space-size=4096
+      BUN_JSC_forceRAMSize: "4294967296"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -40,24 +40,8 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      # The omp the runners compile against: the fork's newest integration build, not runner/omp-build.json's pin
-      # (not committed back). No such release or a runner that fails tsc against it fails the release.
-      - name: Find the newest omp integration build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          sha=$(gh api repos/ompweb-dev/oh-my-pi/commits/integration-release --jq .sha)
-          tag=$(gh api --paginate 'repos/ompweb-dev/oh-my-pi/releases?per_page=100' --jq '.[].tag_name' \
-            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g${sha:0:7}\$" | head -n 1 || true)
-          if [ -z "$tag" ]; then
-            echo "::error::ompweb-dev/oh-my-pi has no integration release for integration-release ($sha)"
-            exit 1
-          fi
-          echo "OMP_TAG=$tag" >> "$GITHUB_ENV"
-      # Without GH_TOKEN: bun install runs the omp packages' scripts.
-      - name: Pin the runner to it
-        run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
+      - name: Prepare pinned OMP main source
+        run: npx bun runner/scripts/use-omp-build.ts
       - name: Pin the binary release identity
         run: |
           now=$(date -u +%s)
@@ -67,7 +51,17 @@ jobs:
         env:
           OMP_WEB_RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: sh scripts/build-release-binaries.sh
+      - name: Allow isolated native fixture scopes
+        run: |
+          rule="polkit.addRule(function(action, subject) { if (action.id === 'org.freedesktop.systemd1.manage-units' && subject.user === '$(id -un)' && /\\.scope$/.test(action.lookup('unit') || '')) { return polkit.Result.YES; } });"
+          printf '%s\n' "$rule" | sudo tee /etc/polkit-1/rules.d/49-ompweb-fixture-scopes.rules >/dev/null
+          systemd-run --scope --quiet --collect --no-ask-password true
       - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+      - name: Smoke test standalone OMP
+        run: |
+          runtime_dir=$(mktemp -d)
+          HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" timeout --kill-after=10s 120s runner/release/omp-linux-x64 --version
+          HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" timeout --kill-after=10s 120s runner/release/omp-linux-x64 --smoke-test
 
       - name: Publish the prerelease
         env:
@@ -77,7 +71,14 @@ jobs:
           tag="$RELEASE_TAG"
           subject=$(git log -1 --format=%s "$SHA")
           # A draft first, so a failed upload never leaves a published prerelease missing archives.
-          gh release create "$tag" release/ompweb-*.tar.gz release/ompweb-*.zip \
+          omp_commit=$(node -p 'require("./runner/omp-build.json").commit')
+          [[ "$omp_commit" =~ ^[0-9a-f]{40}$ ]]
+          runners=(ompweb-omp-linux-x64 ompweb-omp-linux-arm64 ompweb-omp-darwin-x64 ompweb-omp-darwin-arm64 ompweb-omp-windows-x64.exe)
+          (cd runner/release && sha256sum "${runners[@]}" > ompweb-omp.sha256)
+          gh release create "$tag" release/ompweb-*.tar.gz release/ompweb-*.zip runner/release/omp-* "${runners[@]/#/runner/release/}" runner/release/ompweb-omp.sha256 \
             --repo "$GITHUB_REPOSITORY" --target "$SHA" --draft --prerelease --title "$title" \
-            --notes "Binaries built from $GITHUB_REPOSITORY@$SHA ($subject), omp: ompweb-dev/oh-my-pi $OMP_TAG. Not a release: no npm package, no update notice."
+            --notes "Binaries built from $GITHUB_REPOSITORY@$SHA ($subject).
+          OMP_COMMIT=$omp_commit
+          OMP source: https://github.com/can1357/oh-my-pi/commit/$omp_commit
+          runner/patches adds an optional host hook and unique split-chunk paths; standalone defaults are unchanged."
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
