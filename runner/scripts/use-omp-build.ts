@@ -50,7 +50,7 @@ export async function installNativeAddon(sourceDir: string, target: { platform: 
 		await fs.rm(staging, { recursive: true, force: true });
 	}
 }
-async function useOmpBuild(): Promise<void> {
+async function prepareOmpBuild(): Promise<void> {
 	const runnerDir = path.resolve(import.meta.dir, "..");
 	const pinPath = path.join(runnerDir, "omp-build.json");
 	const pin = await Bun.file(pinPath).json();
@@ -102,4 +102,4 @@ async function useOmpBuild(): Promise<void> {
 	console.log(`OMP_COMMIT=${commit}`);
 }
 
-if (import.meta.main) await useOmpBuild();
+if (import.meta.main) await prepareOmpBuild();
