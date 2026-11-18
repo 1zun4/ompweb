@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronRight, Gauge, Pause, Play, RefreshCw, Settings2, Star } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import { formatUsageReset, usageTone, useProviderUsage } from "./AppShell-provider-usage";
+import { formatUsageReset, PROVIDER_ACCOUNTS_CHANGED, usageTone, useProviderUsage } from "./AppShell-provider-usage";
 import type { ProviderUsageAccount, ProviderUsageAccountsSnapshot, ProviderUsageBucket, ProviderUsageWindow } from "@/lib/provider-usage-types";
 import { SidebarIconButton } from "./SessionSidebar-chrome";
 import { ThemedSelect, Tooltip } from "./ui/primitives";
@@ -140,9 +140,11 @@ function AccountDetail({ account, label, defaultLimit, busy, onChange, onOpenPro
           <DetailMeters windows={bucket} limit={limit ?? defaultLimit} t={t} />
         </div>
       ))}
-      {account.paused && (
-        <span style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.4 }}>{t("providerUsage.pausedHint")}</span>
-      )}
+      {account.paused || !WINDOWS.some(({ key }) => account[key]) ? (
+        <span style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.4 }}>
+          {t(account.paused ? "providerUsage.pausedHint" : "appShell.providerUsageNoData")}
+        </span>
+      ) : null}
       <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
         {account.credentialId !== undefined && (account.canLimit || limit !== undefined) && (
           <ThemedSelect
@@ -191,6 +193,12 @@ function AccountDetail({ account, label, defaultLimit, busy, onChange, onOpenPro
 export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provider: string) => void }) {
   const { t } = useI18n();
   const { snapshot, loading, error, refresh, reload } = useProviderUsage<ProviderUsageAccountsSnapshot>("", 5 * 60_000, "/api/provider-usage/accounts");
+  const unavailable = error || snapshot?.usageUnavailable;
+  useEffect(() => {
+    const onAccountsChanged = () => void reload({ invalidate: true });
+    window.addEventListener(PROVIDER_ACCOUNTS_CHANGED, onAccountsChanged);
+    return () => window.removeEventListener(PROVIDER_ACCOUNTS_CHANGED, onAccountsChanged);
+  }, [reload]);
   const [refreshDone, setRefreshDone] = useState(false);
   useEffect(() => {
     if (!refreshDone) return;
@@ -320,11 +328,11 @@ export function ProviderUsageBar({ onOpenProvider }: { onOpenProvider?: (provide
           <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {t("appShell.sectionProviderUsage")}
           </span>
-          {(error || accounts.length === 0) && (
+          {(unavailable || accounts.length === 0) && (
             <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-dim)", fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0 }}>
               {loading && accounts.length === 0
                 ? t("appShell.providerUsageLoading")
-                : error
+                : unavailable
                   ? t("appShell.providerUsageUnavailable")
                   : t("appShell.providerUsageNoData")}
             </span>

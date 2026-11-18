@@ -16,6 +16,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ### Fixed
 
 - **Refreshing Usage applies changed prices, and says when it fails.** Prices edited in `models.yml` now apply to existing sessions when you refresh Settings → Usage. They used to keep the old prices until the web server restarted. A refresh that fails now shows the error above the last report instead of leaving it up without a word.
+- **Provider Usage keeps accounts visible when their limits are unavailable.** Paused accounts can still be resumed, and a failed quota fetch no longer removes stored account names. Signing out drops the account instead of leaving its cached limits behind.
 - **Windows updates no longer fail when the update status is read while it is written.** Host update state, the server worker's status and upgrade plans retry their atomic replacement for a moment when a concurrent reader holds the file, as the server's own update state already did.
 - **GitHub workflow watches no longer regress to stale run states.** Workflow updates retain GitHub's run timestamp and ignore older snapshots for the same or an earlier attempt, so a delayed `queued` response cannot follow a newer `in_progress` delivery.
 - **Keep sidebar transcript results aligned with expandable hits on every linked host.** Each daemon now searches its own active conversations, ignoring abandoned branches and pre-compaction messages.

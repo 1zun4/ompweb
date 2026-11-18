@@ -69,6 +69,7 @@ export interface ProviderUsageAccount {
 
 export interface ProviderUsageAccountsSnapshot {
   generatedAt: number | null;
+  usageUnavailable?: boolean;
   accounts: ProviderUsageAccount[];
   /** Limit omp applies to accounts without their own (100 - `retry.usageReservePct`). */
   defaultLimitPercent: number;
