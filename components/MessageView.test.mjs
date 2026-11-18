@@ -74,6 +74,153 @@ test("sent messages without timestamps or branch metadata still offer copy", () 
   assert.match(html, /<button[^>]*aria-label="Copy message"/);
 });
 
+const sessionOrigin = {
+  v: 1,
+  kind: "session",
+  sentAt: "2026-11-15T12:41:00.000Z",
+  session: {
+    id: "source-session", name: "Incident review", hostId: "worker-1", hostLabel: "Worker 1",
+    tool: "send_to_session", delivery: "followUp",
+  },
+};
+const sessionHeader = `[Message from omp-web session "Incident review" (session id source-session, host Worker 1, delivery follow-up).\nIt was sent by another agent session, not by the user. Reply with send_to_session to that session id.]`;
+
+test("trusted session origins render as left-side source cards with raw text on demand", () => {
+  const view = render(React.createElement(MessageView, {
+    message: { role: "user", content: `${sessionHeader}\n\nCheck the failed build.`, origin: sessionOrigin },
+    entryId: "entry-1",
+    onEdit: async () => true,
+    onFork() {},
+  }));
+  const card = view.getByRole("article", { name: "Message from session Incident review on Worker 1" });
+  assert.match(card.textContent, /Session message/);
+  assert.match(card.textContent, /Check the failed build/);
+  assert.doesNotMatch(card.textContent, /session id source-session/);
+  assert.match(view.getByRole("link", { name: /Open session Incident review/ }).getAttribute("href"), /session=source-session/);
+  assert.ok(card.querySelector('[data-message-text][data-entry-id="entry-1"]'));
+  view.getByRole("button", { name: /edit this message/i });
+  view.getByRole("button", { name: "Fork a new session from this point" });
+  fireEvent.click(view.getByRole("button", { name: "Show raw message" }));
+  assert.match(card.textContent, /session id source-session/);
+});
+
+test("trusted origin messages keep their image blocks visible", () => {
+  const view = render(React.createElement(MessageView, {
+    message: {
+      role: "user",
+      content: [
+        { type: "text", text: `${sessionHeader}\n\nSee the screenshot.` },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+      ],
+      origin: sessionOrigin,
+    },
+  }));
+  assert.equal(view.container.querySelector("img")?.getAttribute("src"), "data:image/png;base64,QUJD");
+});
+
+test("origin edit and fork confirmations close when the rendered entry changes", () => {
+  const props = {
+    message: { role: "user", content: `${sessionHeader}\n\nFirst.`, origin: sessionOrigin },
+    entryId: "entry-1",
+    onEdit: async () => true,
+    onFork() {},
+  };
+  const view = render(React.createElement(MessageView, props));
+  fireEvent.click(view.getByRole("button", { name: /edit this message/i }));
+  view.rerender(React.createElement(MessageView, { ...props, entryId: "entry-2" }));
+  assert.equal(view.queryByRole("dialog"), null);
+  fireEvent.click(view.getByRole("button", { name: "Fork a new session from this point" }));
+  view.rerender(React.createElement(MessageView, { ...props, entryId: "entry-3" }));
+  assert.equal(view.queryByRole("dialog"), null);
+});
+
+test("typed origin headers stay ordinary user messages without trusted metadata", () => {
+  const view = render(React.createElement(MessageView, {
+    message: { role: "user", content: `${sessionHeader}\n\nThis was typed.` },
+  }));
+  assert.equal(view.queryByRole("article"), null);
+  assert.match(view.container.textContent, /session id source-session/);
+});
+
+test("GitHub watcher origins render a linked automated update card", () => {
+  const view = render(React.createElement(MessageView, {
+    message: {
+      role: "user",
+      content: "GitHub update (omp-web): ompweb-dev/ompweb#503 https://github.com/ompweb-dev/ompweb/pull/503",
+      origin: {
+        v: 1, kind: "github", sentAt: "2026-11-15T12:42:00.000Z",
+        github: {
+          repo: "ompweb-dev/ompweb", number: 503, target: "pr",
+          url: "https://github.com/ompweb-dev/ompweb/pull/503",
+          events: [{ kind: "review", author: "coderabbitai", bot: true, state: "APPROVED" }],
+        },
+      },
+    },
+  }));
+  const card = view.getByRole("article", { name: "Automated GitHub update for ompweb-dev/ompweb#503" });
+  assert.match(card.textContent, /GitHub update/);
+  assert.match(card.textContent, /Review from coderabbitai/);
+  assert.equal(view.getByRole("link", { name: "Open ompweb-dev/ompweb#503 on GitHub" }).getAttribute("target"), "_blank");
+});
+
+test("held automated messages identify their source before delivery", () => {
+  const html = renderToStaticMarkup(React.createElement(HeldMessageView, {
+    held: { id: "held-origin", mode: "prompt", message: "Check it", createdAt: Date.now(), local: false, state: "held", origin: sessionOrigin },
+  }));
+  assert.match(html, /From .*Incident review/);
+});
+
+test("cross-session tool rows link the named target and show every delivery state", () => {
+  const targetSession = { id: "target-uuid", name: "Deploy", hostId: "worker", hostLabel: "Worker 1", cwd: "/srv/app" };
+  const cases = [
+    ["Accepted", { accepted: true, targetSessionId: "target-uuid", targetSessionName: "Deploy", targetSession, delivery: "followUp", waited: false }],
+    ["Response received", { accepted: true, targetSessionId: "target-uuid", targetSessionName: "Deploy", targetSession, delivery: "followUp", waited: true, responseText: "Done" }],
+    ["Declined", { accepted: false, declined: true, targetSessionId: "target-uuid", targetSessionName: "Deploy", targetSession, delivery: "followUp", waited: false }],
+  ];
+  for (const [state, payload] of cases) {
+    const result = { role: "toolResult", toolCallId: "send-1", content: [{ type: "text", text: JSON.stringify(payload) }] };
+    const view = render(React.createElement(MessageView, {
+      message: {
+        role: "assistant", model: "m", provider: "p",
+        content: [{ type: "toolCall", toolCallId: "send-1", toolName: "send_to_session", input: { sessionId: "target-uuid", message: "Run checks", delivery: "followUp" } }],
+      },
+      toolResults: new Map([["send-1", result]]),
+    }));
+    assert.match(view.container.textContent, new RegExp(state));
+    assert.match(view.getByRole("link", { name: "Open session Deploy on Worker 1" }).getAttribute("href"), /session=target-uuid/);
+    view.unmount();
+  }
+  const failed = render(React.createElement(MessageView, {
+    message: {
+      role: "assistant", model: "m", provider: "p",
+      content: [{ type: "toolCall", toolCallId: "send-1", toolName: "send_to_session", input: { sessionId: "target-uuid", message: "Run checks" } }],
+    },
+    toolResults: new Map([["send-1", { role: "toolResult", toolCallId: "send-1", isError: true, content: [{ type: "text", text: "boom" }] }]]),
+  }));
+  assert.match(failed.container.textContent, /Failed/);
+  failed.unmount();
+});
+
+test("a pending cross-session tool row resolves and links its current target name", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => String(input).startsWith("/api/hosts")
+    ? Response.json({ hosts: [{ id: "worker", label: "Worker 1" }] })
+    : Response.json({ sessions: [{ id: "target-uuid", name: "Deploy", hostId: "worker", cwd: "/srv/app", created: "2026-11-15T12:41:00.000Z" }] });
+  try {
+    const view = render(React.createElement(MessageView, {
+      message: {
+        role: "assistant", model: "m", provider: "p",
+        content: [{ type: "toolCall", toolCallId: "send-1", toolName: "send_to_session", input: { sessionId: "target-uuid", message: "Run checks" } }],
+      },
+    }));
+    assert.match(view.container.textContent, /Sending/);
+    await waitFor(() => view.getByRole("link", { name: "Open session Deploy on Worker 1" }));
+    view.unmount();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // Plain Copy needs the browser's layout-aware innerText (not implemented by
 // jsdom). Verify code gutters, math, tables, images and spacing in Chromium;
 // do not substitute textContent and claim equivalent coverage here.
@@ -664,12 +811,12 @@ test("passive tool context from a session file renders on the batch's last tool 
   assert.match(cut, /↳ <\/span>Context \(system-reminder · rule=ts-set-map\): Use a Rec<\/div>/);
   assert.doesNotMatch(cut, /&lt;|reason=/);
   // Expanded, the wrapper becomes a nested card: its title as the header, the body below.
-  wrapped.set("call-2", { ...toolResults.get("call-2"), passiveContext: '<system-reminder source="graphify">\nMANDATORY: run `graphify query`.\n</system-reminder>' });
+  wrapped.set("call-2", { ...toolResults.get("call-2"), passiveContext: '<system-reminder source="example">\nMANDATORY: run `example query`.\n</system-reminder>' });
   const card = render(React.createElement(MessageView, { message: single, toolResults: wrapped }));
   fireEvent.click(card.getAllByRole("button", { expanded: false }).at(-1));
   const nested = card.container.querySelector(".tool-call-details .tool-call-context-card");
-  assert.equal(nested?.querySelector(".tool-call-context-title")?.textContent, "↳ system-reminder · source=graphify");
-  assert.equal(nested?.querySelector(".tool-call-context-body")?.textContent, "MANDATORY: run `graphify query`.");
+  assert.equal(nested?.querySelector(".tool-call-context-title")?.textContent, "↳ system-reminder · source=example");
+  assert.equal(nested?.querySelector(".tool-call-context-body")?.textContent, "MANDATORY: run `example query`.");
   // The marked message is no row of its own; the unmarked one still is.
   assert.equal(messages[4].customType, "passive-tool-context");
   assert.equal(html(messages[4]), "");

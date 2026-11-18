@@ -1,6 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync, type Stats } from "fs";
 import { normalize as normalizePath } from "path";
 import { getAgentDir } from "./omp/paths";
+import { parseMessageOrigin, type MessageOrigin } from "./message-origin";
 import { isClientMessageId } from "./client-message-ids";
 import {
   containsBlobRef,
@@ -564,6 +565,7 @@ interface HistoryEntryRange {
   firstKeptEntryId?: string;
   legacyCustom?: boolean;
   clientMessageId?: string;
+  origin?: MessageOrigin;
 }
 
 interface SessionHistoryIndex {
@@ -623,7 +625,13 @@ function historyEntryMetadata(entry: SessionEntry): SessionEntry {
     compact.data = isRecord(entry.data) ? { phases: entry.data.phases } : undefined;
   } else if (entry.type === "custom" && entry.customType === "client-message-entry") {
     compact.customType = entry.customType;
-    compact.data = isRecord(entry.data) ? { clientMessageId: entry.data.clientMessageId, entryId: entry.data.entryId } : undefined;
+    const data = isRecord(entry.data) ? entry.data : {};
+    const origin = parseMessageOrigin(data.origin);
+    compact.data = {
+      clientMessageId: data.clientMessageId,
+      entryId: data.entryId,
+      ...(origin ? { origin } : {}),
+    };
   } else if (entry.type === "custom" && entry.customType === "client-message-resolution") {
     compact.customType = entry.customType;
     compact.data = { clientMessageIds: isRecord(entry.data) && Array.isArray(entry.data.clientMessageIds)
@@ -645,13 +653,16 @@ function buildHistoryIndex(
   });
   if (loaded.error === "too_large") throw new SessionFileTooLargeError(filePath);
   const { selected, compactionId, entryClientIds, ...metadata } = selectSessionContext(loaded.entries, leafId, { includePreCompaction });
-  const rows = selected.map((entry): HistoryEntryRange => ({
-    id: entry.id,
-    ...ranges.get(entry)!,
-    ...(entry.type === "compaction" ? { firstKeptEntryId: entry.firstKeptEntryId } : {}),
-    ...(entryClientIds.has(entry.id) ? { clientMessageId: entryClientIds.get(entry.id) } : {}),
-    ...(entry.type === "message" && entry.message.role === "custom" ? { legacyCustom: true } : {}),
-  }));
+  const rows = selected.map((entry): HistoryEntryRange => {
+    const correlation = entryClientIds.get(entry.id);
+    return {
+      id: entry.id,
+      ...ranges.get(entry)!,
+      ...(entry.type === "compaction" ? { firstKeptEntryId: entry.firstKeptEntryId } : {}),
+      ...(correlation ? { clientMessageId: correlation.clientMessageId, origin: correlation.origin } : {}),
+      ...(entry.type === "message" && entry.message.role === "custom" ? { legacyCustom: true } : {}),
+    };
+  });
   const tipId = loaded.entries.at(-1)?.id ?? null;
   // Detach metadata strings from the parser's JSON source: an ID represented
   // by a sliced V8 string must not pin a multi-megabyte message body.
@@ -765,9 +776,9 @@ export function getSessionHistoryPage(
     context: {
       ...index.metadata,
       entryIds: index.entryIds.slice(start, end),
-      messages: entries.map((entry) => entry.type === "compaction"
+      messages: entries.map((entry, offset) => entry.type === "compaction"
         ? compactionUiMessage(entry, entry.id === index.compactionId)
-        : entryToUiMessage(entry, options)!),
+        : entryToUiMessage(entry, { ...options, origin: index.rows[start + offset]?.origin })!),
     },
   };
   return { history, leafId: index.leafId, tipId: index.tipId };
@@ -845,8 +856,12 @@ export function buildSessionContext(
     entryIds: selected.map((entry) => entry.id),
     messages: selected.map((entry) => {
       if (entry.type === "compaction") return compactionUiMessage(entry, entry.id === compactionId);
-      const clientMessageId = entryClientIds.get(entry.id);
-      return entryToUiMessage(clientMessageId ? { ...entry, clientMessageId } as SessionEntry : entry, options)!;
+      const correlation = entryClientIds.get(entry.id);
+      const message = entryToUiMessage(
+        correlation ? { ...entry, clientMessageId: correlation.clientMessageId } as SessionEntry : entry,
+        options,
+      )!;
+      return correlation?.origin && message.role === "user" ? { ...message, origin: correlation.origin } : message;
     }),
   };
 }
@@ -857,7 +872,7 @@ function selectSessionContext(
   leafId?: string | null,
   options: { includePreCompaction?: boolean } = {},
 ) {
-  const empty = { selected: [] as SessionEntry[], compactionId: null as string | null, thinkingLevel: "off", model: null as SessionContext["model"], todoPhases: [] as TodoPhase[], entryClientIds: new Map<string, string>() };
+  const empty = { selected: [] as SessionEntry[], compactionId: null as string | null, thinkingLevel: "off", model: null as SessionContext["model"], todoPhases: [] as TodoPhase[], entryClientIds: new Map<string, { clientMessageId: string; origin?: MessageOrigin }>() };
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
   if (leafId === null) return empty;
@@ -883,20 +898,28 @@ function selectSessionContext(
   const persistedClientMessageIds = new Set<string>();
   const resolvedClientMessageIds = new Set<string>();
   // The journal names its message by id, so only entries on the active path count: an abandoned branch's are never visited.
-  const journaled = new Map<string, string>();
+  const journaled = new Map<string, { clientMessageId: string; origin?: MessageOrigin }>();
   for (const entry of path) {
     if (entry.type === "custom" && entry.customType === "client-message-entry" && isRecord(entry.data)
       && isClientMessageId(entry.data.clientMessageId) && typeof entry.data.entryId === "string") {
-      journaled.set(entry.data.entryId, entry.data.clientMessageId);
+      const origin = parseMessageOrigin(entry.data.origin);
+      journaled.set(entry.data.entryId, {
+        clientMessageId: entry.data.clientMessageId,
+        ...(origin ? { origin } : {}),
+      });
     }
   }
-  const entryClientIds = new Map<string, string>();
+  const entryClientIds = new Map<string, { clientMessageId: string; origin?: MessageOrigin }>();
   for (const entry of path) {
     if (entry.type === "message" || entry.type === "custom_message") {
-      const id = isClientMessageId(entry.clientMessageId) ? entry.clientMessageId : journaled.get(entry.id);
-      if (id) {
-        entryClientIds.set(entry.id, id);
-        persistedClientMessageIds.add(id);
+      const journal = journaled.get(entry.id);
+      const clientMessageId = isClientMessageId(entry.clientMessageId) ? entry.clientMessageId : journal?.clientMessageId;
+      if (clientMessageId) {
+        entryClientIds.set(entry.id, {
+          clientMessageId,
+          ...(journal?.origin ? { origin: journal.origin } : {}),
+        });
+        persistedClientMessageIds.add(clientMessageId);
       }
     } else if (entry.type === "custom" && entry.customType === "client-message-resolution"
       && isRecord(entry.data) && Array.isArray(entry.data.clientMessageIds)) {
@@ -1179,7 +1202,7 @@ function compactionUiMessage(entry: CompactionEntry, active: boolean): CustomMes
 // Returns null for entries that do not map to chat history (metadata, non-message types).
 export function entryToUiMessage(
   entry: SessionEntry,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean },
+  options: { deferThinking?: boolean; deferToolResultImages?: boolean; origin?: MessageOrigin },
 ): AgentMessage | null {
   switch (entry.type) {
     case "message": {
@@ -1187,7 +1210,9 @@ export function entryToUiMessage(
       // object is missing; skip them like any other unmappable entry instead
       // of crashing every reader of the file.
       if (!isRecord(entry.message)) return null;
-      const raw = isClientMessageId(entry.clientMessageId) ? { ...entry.message, clientMessageId: entry.clientMessageId } : entry.message;
+      const nativeMessage = { ...entry.message };
+      delete (nativeMessage as Record<string, unknown>).origin;
+      const raw = isClientMessageId(entry.clientMessageId) ? { ...nativeMessage, clientMessageId: entry.clientMessageId } : nativeMessage;
       // omp-only roles are folded into displayable custom messages so the
       // existing role-keyed UI renders them without new components.
       if (raw.role === "developer") {
@@ -1235,14 +1260,15 @@ export function entryToUiMessage(
         ? toolResultImagesAsUrls(normalizeToolCalls(raw))
         : normalizeToolCalls(raw);
       const message = stripToolResultDetails(normalized);
-      if (!options.deferThinking || message.role !== "assistant") return withNormalizedTimestamp(message);
+      const displayMessage = options.origin && message.role === "user" ? { ...message, origin: options.origin } : message;
+      if (!options.deferThinking || displayMessage.role !== "assistant") return withNormalizedTimestamp(displayMessage);
       // Guard like the loader does for bad lines: normalizeToolCalls passes
       // non-array content through unchanged, so a string-content assistant
       // entry must not 500 the whole context route.
-      if (!Array.isArray(message.content)) return withNormalizedTimestamp(message);
+      if (!Array.isArray(displayMessage.content)) return withNormalizedTimestamp(displayMessage);
       const deferred = {
-        ...message,
-        content: message.content.map((block) => (
+        ...displayMessage,
+        content: displayMessage.content.map((block) => (
           block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim() !== ""
             ? { ...block, thinking: "", deferred: true }
             : block
