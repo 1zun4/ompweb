@@ -2,6 +2,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { compileCodingAgent } from "../vendor/omp/packages/coding-agent/scripts/compile-binary";
+import { installNativeAddon } from "./use-omp-build";
 
 const runnerDir = path.resolve(import.meta.dir, "..");
 const sourceDir = path.join(runnerDir, "vendor", "omp");
@@ -24,35 +25,13 @@ function run(cmd: string[], cwd = sourceDir): string {
 }
 const pin = await Bun.file(path.join(runnerDir, "omp-build.json")).json();
 if (run(["git", "rev-parse", "HEAD"]).trim() !== pin.commit) throw new Error("OMP source does not match omp-build.json");
-const nativeDir = path.join(sourceDir, "packages", "natives", "native");
-const { version } = await Bun.file(path.join(nativeDir, "..", "package.json")).json();
 await fs.mkdir(path.join(runnerDir, "release"), { recursive: true });
 run([process.execPath, "run", "gen:stats"]);
 run([process.execPath, "run", "gen:export-viewer"]);
 try {
 	for (const id of ids) {
 		const target = targets[id];
-		const staging = await fs.mkdtemp(path.join(runnerDir, "vendor", "native-"));
-		try {
-			const leaf = `@oh-my-pi/pi-natives-${target.platform}-${target.arch}`;
-			const packed = JSON.parse(run([
-				"npm", "pack", `${leaf}@${version}`, "--registry=https://registry.npmjs.org",
-				"--ignore-scripts", "--json", "--pack-destination", staging,
-			]));
-			const filename = packed[0]?.filename;
-			if (typeof filename !== "string" || !/^[\w.-]+\.tgz$/.test(filename)) throw new Error("Invalid native package archive");
-			const tar = process.platform === "win32" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
-			run([tar, "-xf", path.join(staging, filename), "-C", staging]);
-			const manifest = await Bun.file(path.join(staging, "package", "package.json")).json();
-			if (manifest.name !== leaf || manifest.version !== version) throw new Error(`Native package does not match ${leaf}@${version}`);
-			for (const file of await fs.readdir(path.join(staging, "package"))) {
-				if (file.startsWith(`pi_natives.${target.platform}-${target.arch}`) && file.endsWith(".node")) {
-					await fs.copyFile(path.join(staging, "package", file), path.join(nativeDir, file));
-				}
-			}
-		} finally {
-			await fs.rm(staging, { recursive: true, force: true });
-		}
+		await installNativeAddon(sourceDir, target);
 		const extension = target.platform === "win32" ? ".exe" : "";
 		for (const name of ["ompweb-omp", "omp"]) {
 			const outfile = path.join(runnerDir, "release", `${name}-${id}${extension}`);
