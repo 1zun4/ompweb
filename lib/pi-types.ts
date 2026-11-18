@@ -238,6 +238,16 @@ export interface RpcAskDialogAnswer {
 }
 
 /**
+ * One answer to a blocking dialog, from the web dialog or the notification
+ * answer endpoint. Exactly one variant is sent.
+ */
+export type ExtensionUiResponse =
+  | { value: string }
+  | { confirmed: boolean }
+  | { cancelled: true }
+  | { answers: RpcAskDialogAnswer[] };
+
+/**
  * A submitted whole-form ask (omp's `formDialog`), by control `name`: radios, single checkboxes and
  * single selects give their value (omitted when nothing is chosen), checkbox groups and multi-selects
  * an array, `number`/`range` inputs a number, other text fields their text. Mirrors pi-tui's html-form.

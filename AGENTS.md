@@ -134,6 +134,7 @@ app/api/
   hosts/cluster-config/file/[hash]/route.ts GET one file of the current manifest by its sha256 (404 for any other hash, an older version's included); same admission and gate as the manifest
   hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added too by any join while it is not a member; the host needs link protocol 10; 409 `host_in_other_cluster` when it holds another server's configuration), then sends the host its configuration (`clusterConfigOp` `apply`) | DELETE leave, then `restore` (none to a daemon below protocol 10, which never applied one); the body carries `restoreError` when the host could not put its own configuration back; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
+  notifications/answer/route.ts   POST { sessionId, requestId, response } answer a pending dialog from a notification (never spawns omp)
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
   notifications/history/route.ts  GET entries | PATCH { ids } mark read | DELETE ?id= remove one, ?all=1 clear
@@ -2068,8 +2069,13 @@ during the wait.
   leak it); else if a visible tab with an open stream exists, `whenActive:
   "toast"` devices get a toast on their active tabs only; else push (subscribed
   devices) or in-page `showNotification` (tabs with an open stream).
-- The server decides before pushing: iOS revokes push permission for pushes
-  that display nothing, so `public/sw.js` always shows what it receives.
+- The server decides before pushing: a push that displays nothing is a silent
+  push, and iOS revokes the permission for one while Chromium and Firefox
+  substitute a generic card and eventually mute the origin. `public/sw.js`
+  therefore always shows what it receives, and a settled dialog is retracted on
+  the tab streams only (`{type: "notification-dismiss", tag, sessionId,
+  requestId}`) — never by a push. A device that is not reachable keeps the
+  stale card until the next `input` push replaces it by tag or the app syncs.
 - Notifications have their own `notifications` channel (`clientId` = the
   tab's notification client id), opened by `useNotifications` in `AppShell`,
   so a tab stays reachable on every view, Settings included. A tab on
