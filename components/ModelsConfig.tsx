@@ -25,6 +25,7 @@ import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
 import { ProviderAccounts } from "./ProviderAccounts";
+import { PROVIDER_ACCOUNTS_CHANGED } from "./AppShell-provider-usage";
 import {
   API_OPTIONS,
   COMPOSER_MODELS_STORAGE_KEY,
@@ -850,6 +851,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
         es.close();
         setLoginState({ phase: "success" });
         setAccountsVersion((v) => v + 1);
+        window.dispatchEvent(new Event(PROVIDER_ACCOUNTS_CHANGED));
         onRefresh();
       } else if (data.type === "error") {
         es.close();

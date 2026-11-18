@@ -16,14 +16,16 @@ test("manual refresh gets fresh limits on older browsers while automatic polling
   let finishPoll;
   let freshPercent = 10;
   let cachedPercent = 10;
+  let unavailable = false;
   try {
     delete URLSearchParams.prototype.size;
     window.setInterval = (callback) => { poll = callback; return 1; };
     window.clearInterval = () => {};
     globalThis.fetch = async (url) => {
       if (new URL(url, "http://localhost").searchParams.get("refresh") === "true") cachedPercent = freshPercent;
+      const response = unavailable ? new Response(null, { status: 502 }) : Response.json(snapshot(cachedPercent));
       if (finishPoll) await new Promise((resolve) => { finishPoll.resolve = resolve; });
-      return { ok: true, json: async () => snapshot(cachedPercent) };
+      return response;
     };
     const { result, unmount } = renderHook(() => useProviderUsage("", 300_000));
     await act(async () => {});
@@ -66,6 +68,26 @@ test("manual refresh gets fresh limits on older browsers while automatic polling
       assert.equal(await reloaded, true);
     });
     assert.equal(result.current.snapshot.reports[0].fiveHour.percent, 65, "reload during an in-flight GET must issue a post-mutation non-forced GET");
+    unavailable = true;
+    await act(async () => { assert.equal(await result.current.reload(), false); });
+    assert.equal(result.current.error, true);
+    assert.equal(result.current.snapshot.reports[0].fiveHour.percent, 65, "a failed refresh retains the last visible snapshot");
+
+    unavailable = false;
+    finishPoll = {};
+    act(() => poll());
+    unavailable = true;
+    let afterLogout;
+    act(() => { afterLogout = result.current.reload({ invalidate: true }); });
+    await act(async () => {
+      const finish = finishPoll.resolve;
+      finishPoll = undefined;
+      finish();
+      assert.equal(await afterLogout, false);
+    });
+    assert.equal(result.current.error, true);
+    assert.equal(result.current.snapshot, null, "a pre-logout poll cannot bring back invalidated rows");
+    unavailable = false;
     finishPoll = {};
     let cancelled;
     act(() => { cancelled = result.current.refresh(); });

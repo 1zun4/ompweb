@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { ProviderUsageReport, ProviderUsageSnapshot } from "@/lib/provider-usage-types";
+import { isRecord } from "@/lib/type-guards";
+
+export const PROVIDER_ACCOUNTS_CHANGED = "omp-provider-accounts-change";
 
 export function formatUsageReset(value: number, unit: "minutes" | "hours"): string {
   if (unit === "minutes") {
@@ -51,16 +54,18 @@ export type ProviderUsageState<T = ProviderUsageSnapshot> = {
   error: boolean;
 };
 
+type UsageLoad = "poll" | "reload" | "force" | "invalidate";
+
 /** Polls `path` (`refresh()` asks omp for fresh limits, `reload()` only re-reads omp-web's view). */
 export function useProviderUsage<T = ProviderUsageSnapshot>(
   query: string | null,
   refreshMs?: number,
   path = "/api/provider-usage",
-): ProviderUsageState<T> & { refresh: () => Promise<boolean>; reload: () => Promise<boolean> } {
+): ProviderUsageState<T> & { refresh: () => Promise<boolean>; reload: (options?: { invalidate?: boolean }) => Promise<boolean> } {
   const [state, setState] = useState<ProviderUsageState<T>>({ snapshot: null, loading: false, error: false });
-  const refreshRef = useRef<(mode: "poll" | "reload" | "force") => Promise<boolean>>(async () => false);
+  const refreshRef = useRef<(mode: UsageLoad) => Promise<boolean>>(async () => false);
   const refresh = useCallback(() => refreshRef.current("force"), []);
-  const reload = useCallback(() => refreshRef.current("reload"), []);
+  const reload = useCallback((options?: { invalidate?: boolean }) => refreshRef.current(options?.invalidate ? "invalidate" : "reload"), []);
   useEffect(() => {
     if (query === null) {
       setState({ snapshot: null, loading: false, error: false });
@@ -70,11 +75,16 @@ export function useProviderUsage<T = ProviderUsageSnapshot>(
     setState({ snapshot: null, loading: true, error: false });
     let inFlight: Promise<boolean> | undefined;
     let inFlightForced = false;
-    const load = (mode: "poll" | "reload" | "force" = "poll"): Promise<boolean> => {
+    let generation = 0;
+    const load = (mode: UsageLoad = "poll"): Promise<boolean> => {
       if (controller.signal.aborted) return Promise.resolve(false);
+      if (mode === "invalidate") {
+        generation += 1;
+        setState({ snapshot: null, loading: true, error: false });
+      }
       if (inFlight) {
         if (mode === "force" && !inFlightForced) return inFlight.then(() => load("force"));
-        if (mode === "reload") return inFlight.then(() => load("poll"));
+        if (mode === "reload" || mode === "invalidate") return inFlight.then(() => load("poll"));
         return inFlight;
       }
       const force = mode === "force";
@@ -83,16 +93,19 @@ export function useProviderUsage<T = ProviderUsageSnapshot>(
       if (force) params.set("refresh", "true");
       const queryString = params.toString();
       inFlightForced = force;
+      const startedAt = generation;
       inFlight = (async () => {
         try {
           const response = await fetch(`${path}${queryString ? `?${queryString}` : ""}`, { signal: controller.signal });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const snapshot = await response.json() as T;
-          if (controller.signal.aborted) return false;
+          if (controller.signal.aborted || generation !== startedAt) return false;
           setState({ snapshot, loading: false, error: false });
-          return true;
+          return !isRecord(snapshot) || snapshot.usageUnavailable !== true;
         } catch {
-          if (!controller.signal.aborted) setState({ snapshot: null, loading: false, error: true });
+          if (!controller.signal.aborted && generation === startedAt) {
+            setState((previous) => ({ ...previous, loading: false, error: true }));
+          }
           return false;
         } finally {
           inFlight = undefined;

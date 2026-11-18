@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { OMP_NOT_FOUND, resolveOmpBin } from "./omp/omp-cli";
+import { RpcCommandError } from "./omp/rpc-process";
 import { runUtilityCommand } from "./omp/rpc-utility";
 import { readAccountPolicyConfig, writeAccountPolicies } from "./omp/settings-config";
 import { createChildProcessEnvironment } from "./project-command-env";
@@ -30,12 +31,14 @@ const USAGE_CACHE_TTL_MS = 5 * 60_000;
 
 type UsageQuery = { provider?: string; modelId?: string };
 
-type CachedUsage = { expiresAt: number; output: string };
+type UsagePayload = Record<string, unknown>;
+type CachedUsage = { expiresAt: number; payload: UsagePayload };
 
 let usageCache: CachedUsage | undefined;
-let usageInFlight: Promise<string> | undefined;
+let usageInFlight: Promise<UsagePayload> | undefined;
 let usageInFlightForced = false;
 let usageGeneration = 0;
+let usageAccountState: string | undefined;
 
 export function invalidateUsageCache(): void {
   usageGeneration += 1;
@@ -234,7 +237,10 @@ function rawUsageReports(payload: Record<string, unknown>): (Record<string, unkn
 }
 
 export function parseProviderUsageOutput(output: string, query: UsageQuery = {}, now = Date.now()): ProviderUsageSnapshot {
-  const payload = parseUsagePayload(output);
+  return usageSnapshot(parseUsagePayload(output), query, now);
+}
+
+function usageSnapshot(payload: UsagePayload, query: UsageQuery, now = Date.now()): ProviderUsageSnapshot {
   const reports = rawUsageReports(payload).flatMap((report, index) => (report ? normalizeReport(report, query, now, index) : []));
   return { generatedAt: asNumber(payload.generatedAt) ?? null, reports };
 }
@@ -294,19 +300,23 @@ function policyFields(policies: readonly unknown[], provider: string, account: A
   return { ...(reservePct !== undefined ? { limitPercent: 100 - reservePct } : {}), ...(priority !== undefined ? { priority } : {}) };
 }
 
-/**
- * One entry per account omp reports, its usage splits merged, matched to the stored account it came
- * from. Paused accounts report no usage, so they are listed from `stored`. Without `stored` (a runner
- * predating `get_usage_accounts`) nothing carries a credential id and nothing can be changed.
- */
 export function parseProviderUsageAccounts(
-  output: string,
+  output: string | null,
   stored: readonly StoredUsageAccount[] | null,
   policies: readonly unknown[],
   now = Date.now(),
 ): { generatedAt: number | null; accounts: ProviderUsageAccount[] } {
-  const payload = parseUsagePayload(output);
-  const entries = rawUsageReports(payload).flatMap((raw, index) => {
+  return usageAccounts(output === null ? null : parseUsagePayload(output), stored, policies, now);
+}
+
+function usageAccounts(
+  payload: UsagePayload | null,
+  stored: readonly StoredUsageAccount[] | null,
+  policies: readonly unknown[],
+  now = Date.now(),
+): { generatedAt: number | null; accounts: ProviderUsageAccount[] } {
+  const rows = stored ?? [];
+  const entries = (payload ? rawUsageReports(payload) : []).flatMap((raw, index) => {
     const provider = nonEmptyString(raw?.provider);
     if (!raw || !provider) return [];
     return [{ provider, index, identity: reportIdentity(raw), splits: normalizeReport(raw, {}, now, index) }];
@@ -314,15 +324,15 @@ export function parseProviderUsageAccounts(
   const claimed = new Set<number>();
   const accounts: Omit<ProviderUsageAccount, "key">[] = [];
   for (const entry of entries) {
-    const providerAccounts = (stored ?? []).filter((account) => account.provider === entry.provider);
+    const providerAccounts = rows.filter((account) => account.provider === entry.provider);
     const matches = providerAccounts.filter((account) => reportMatchesAccount(entry.identity, account));
     const active = matches.filter((account) => !account.paused);
     // A report fetched before its account was paused: the paused row below stands for it.
     if (active.length === 0 && matches.length > 0) continue;
-    const activeAccounts = providerAccounts.filter((account) => !account.paused);
+    const sole = providerAccounts.length === 1 ? providerAccounts[0] : undefined;
     const hasIdentity = (id: AccountIdentity) => !!(id.email || id.accountId || id.projectId || id.orgId);
     const singleReport = entries.filter((other) => other.provider === entry.provider).length === 1;
-    const soleActive = activeAccounts.length === 1 ? activeAccounts[0] : undefined;
+    const soleActive = sole?.paused === false ? sole : undefined;
     // Copilot credentials carry no identity: fall back only when at least one side lacks identity, never on conflict.
     const match = active.length === 1
       ? active[0]
@@ -333,24 +343,29 @@ export function parseProviderUsageAccounts(
     if (match && !claimed.has(match.credentialId)) {
       claimed.add(match.credentialId);
       account.credentialId = match.credentialId;
+      if (match.email) {
+        account.accountLabel = match.email;
+        delete account.accountIndex;
+      }
       Object.assign(account, policyFields(policies, entry.provider, match));
       account.canPrioritize = canNameAccount(match);
       account.canLimit = account.canPrioritize && WINDOW_KEYS.some((key) => account[key]);
     }
     accounts.push(account);
   }
-  for (const [offset, paused] of (stored ?? []).filter((account) => account.paused).entries()) {
+  for (const [index, storedAccount] of rows.entries()) {
+    if (claimed.has(storedAccount.credentialId)) continue;
     accounts.push({
-      provider: paused.provider,
-      ...(paused.email ? { accountLabel: paused.email } : { accountIndex: entries.length + offset + 1 }),
-      credentialId: paused.credentialId,
-      paused: true,
-      canPrioritize: canNameAccount(paused),
-      ...policyFields(policies, paused.provider, paused),
+      provider: storedAccount.provider,
+      ...(storedAccount.email ? { accountLabel: storedAccount.email } : { accountIndex: index + 1 }),
+      credentialId: storedAccount.credentialId,
+      paused: storedAccount.paused,
+      canPrioritize: canNameAccount(storedAccount),
+      ...policyFields(policies, storedAccount.provider, storedAccount),
     });
   }
   return {
-    generatedAt: asNumber(payload.generatedAt) ?? null,
+    generatedAt: asNumber(payload?.generatedAt) ?? null,
     // shortcut: an account without a stored credential is keyed by its label or omp's position, so a
     // name for "Account 5" follows the position if omp reorders its reports; key it by identity when that bites.
     accounts: accounts.map((account) => ({
@@ -377,7 +392,7 @@ async function listStoredUsageAccounts(): Promise<StoredUsageAccount[]> {
   });
 }
 
-async function fetchProviderUsage(refresh = false): Promise<string> {
+async function fetchProviderUsage(refresh = false): Promise<UsagePayload> {
   const bin = resolveOmpBin();
   if (!bin) throw new Error(OMP_NOT_FOUND);
   if (refresh) {
@@ -398,24 +413,24 @@ async function fetchProviderUsage(refresh = false): Promise<string> {
     windowsHide: true,
     env: createChildProcessEnvironment(),
   });
-  return stdout;
+  return parseUsagePayload(stdout);
 }
 
-function getUsageOutput(refresh = false): Promise<string> {
-  if (!refresh && usageCache && usageCache.expiresAt > Date.now()) return Promise.resolve(usageCache.output);
+function getUsagePayload(refresh = false): Promise<UsagePayload> {
+  if (!refresh && usageCache && usageCache.expiresAt > Date.now()) return Promise.resolve(usageCache.payload);
   if (usageInFlight) {
     return refresh && !usageInFlightForced
-      ? usageInFlight.then(() => getUsageOutput(true), () => getUsageOutput(true))
+      ? usageInFlight.then(() => getUsagePayload(true), () => getUsagePayload(true))
       : usageInFlight;
   }
   const generation = usageGeneration;
   usageInFlightForced = refresh;
   const pending = fetchProviderUsage(refresh)
-    .then((output) => {
+    .then((payload) => {
       if (generation === usageGeneration) {
-        usageCache = { output, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
+        usageCache = { payload, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
       }
-      return output;
+      return payload;
     })
     .finally(() => {
       if (usageInFlight === pending) usageInFlight = undefined;
@@ -425,19 +440,33 @@ function getUsageOutput(refresh = false): Promise<string> {
 }
 
 export async function getProviderUsage(query: UsageQuery = {}, refresh = false): Promise<ProviderUsageSnapshot> {
-  return parseProviderUsageOutput(await getUsageOutput(refresh), query);
+  return usageSnapshot(await getUsagePayload(refresh), query);
 }
 
 export async function getProviderUsageAccounts(refresh = false): Promise<ProviderUsageAccountsSnapshot> {
-  const [output, stored] = await Promise.all([getUsageOutput(refresh), listStoredUsageAccounts().catch(() => null)]);
+  const stored = await listStoredUsageAccounts().catch((error: unknown) => {
+    if (error instanceof RpcCommandError && error.message === "unknown command: get_usage_accounts") return null;
+    throw error;
+  });
+  if (stored) {
+    // A cached report can outlive its credential, including when logout happened in the CLI.
+    const state = JSON.stringify([...stored].sort((a, b) => a.credentialId - b.credentialId));
+    if (usageAccountState !== undefined && usageAccountState !== state) invalidateUsageCache();
+    usageAccountState = state;
+  }
+  const payload = await getUsagePayload(refresh).catch((error: unknown) => {
+    if (!stored) throw error;
+    return null;
+  });
   const { policies, reservePct } = readAccountPolicyConfig();
   const { accountNames: names, accountOrder } = loadWebServerSettings();
-  const { generatedAt, accounts } = parseProviderUsageAccounts(output, stored, policies);
+  const { generatedAt, accounts } = usageAccounts(payload, stored, policies);
   // Rows the user placed come first in their order; new ones follow in omp's order.
   const rank = (key: string, index: number) => (accountOrder.includes(key) ? accountOrder.indexOf(key) : accountOrder.length + index);
   const ordered = accounts.map((account, index) => ({ account, rank: rank(account.key, index) })).sort((a, b) => a.rank - b.rank);
   return {
     generatedAt,
+    ...(payload === null ? { usageUnavailable: true } : {}),
     accounts: ordered.map(({ account }) => (names[account.key] ? { ...account, name: names[account.key] } : account)),
     defaultLimitPercent: 100 - reservePct,
   };

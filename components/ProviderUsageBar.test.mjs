@@ -5,6 +5,7 @@ import { createElement } from "react";
 
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react/pure.js");
 const { ProviderUsageBar } = await import("./ProviderUsageBar.tsx");
+const { PROVIDER_ACCOUNTS_CHANGED } = await import("./AppShell-provider-usage.ts");
 
 afterEach(() => {
   cleanup();
@@ -164,4 +165,44 @@ test("Alt+ArrowUp/Down reorders accounts and serializes concurrent order saves",
 
   const renderedNames = [...document.querySelectorAll(".provider-usage-row")].map((el) => el.textContent);
   assert.ok(renderedNames[0].includes("Google Default"), "final order should reflect the latest move");
+});
+
+test("paused accounts can be resumed during a quota outage and logout reloads the list", async (t) => {
+  window.localStorage.setItem("omp-web:provider-usage-collapsed", "false");
+  const paused = makeSnapshot().accounts.slice(0, 2).map((account) => ({
+    ...account, sevenDay: undefined, paused: true, canLimit: false,
+  }));
+  let accounts = paused;
+  let rosterUnavailable = false;
+  const changes = [];
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    if (init?.method === "PATCH") {
+      const change = JSON.parse(init.body);
+      changes.push(change);
+      accounts = accounts.map((account) => account.credentialId === change.credentialId ? { ...account, paused: change.paused } : account);
+      return Response.json({ ok: true });
+    }
+    if (rosterUnavailable) return new Response(null, { status: 503 });
+    return Response.json(makeSnapshot({ accounts, usageUnavailable: true, generatedAt: null }));
+  });
+
+  await act(async () => { render(createElement(ProviderUsageBar)); });
+  const row = screen.getByText("Main Claude").closest("[role='button']");
+  assert.ok(screen.getByText("Provider limits unavailable"));
+  assert.ok(screen.getByText("Second Claude"));
+  fireEvent.keyDown(row, { key: "Enter" });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Resume Main Claude" })); });
+  assert.ok(screen.getByRole("button", { name: "Pause Main Claude" }));
+  assert.deepEqual(changes, [{ provider: "anthropic", credentialId: 1, paused: false }]);
+
+  rosterUnavailable = true;
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh" })); });
+  assert.ok(screen.getByText("Main Claude"));
+  assert.ok(screen.getByText("Provider limits unavailable"));
+  rosterUnavailable = false;
+
+  accounts = accounts.filter((account) => account.credentialId !== 1);
+  await act(async () => { window.dispatchEvent(new window.Event(PROVIDER_ACCOUNTS_CHANGED)); });
+  assert.equal(screen.queryByText("Main Claude"), null);
+  assert.ok(screen.getByText("Second Claude"));
 });
