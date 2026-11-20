@@ -13,6 +13,8 @@ import * as authApiKeyProvider from "@/app/api/auth/api-key/[provider]/route";
 import * as authLoginProvider from "@/app/api/auth/login/[provider]/route";
 import * as authProviders from "@/app/api/auth/providers/route";
 import * as cwdBrowse from "@/app/api/cwd/browse/route";
+import * as cwdPick from "@/app/api/cwd/pick/route";
+import * as cwdPicker from "@/app/api/cwd/picker/route";
 import * as cwdValidate from "@/app/api/cwd/validate/route";
 import * as defaultCwd from "@/app/api/default-cwd/route";
 import * as events from "@/app/api/events/route";
@@ -117,6 +119,8 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "auth/login/[provider]": authLoginProvider,
   "auth/providers": authProviders,
   "cwd/browse": cwdBrowse,
+  "cwd/pick": cwdPick,
+  "cwd/picker": cwdPicker,
   "cwd/validate": cwdValidate,
   "default-cwd": defaultCwd,
   "events": events,
