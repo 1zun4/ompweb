@@ -1,6 +1,6 @@
 // The OS folder dialog for the machine running the server. Only meaningful when the page is
-// opened on that same desktop, so the /api/cwd routes gate on a loopback request.
-import { spawn } from "node:child_process";
+// opened on that same desktop, so the /api/cwd routes gate on the connection's peer address.
+import { spawn, spawnSync } from "node:child_process";
 
 export type PickedDirectory = { path: string } | { cancelled: true };
 
@@ -32,6 +32,19 @@ export function pickerCommand(platform: NodeJS.Platform = process.platform): { f
   return null;
 }
 
+/** Whether this platform's chooser is installed: Windows and macOS ship theirs, Linux needs zenity. */
+export function hasPicker(platform: NodeJS.Platform = process.platform): boolean {
+  const command = pickerCommand(platform);
+  if (!command) return false;
+  if (platform !== "linux") return true;
+  return spawnSync("which", [command.file], { stdio: "ignore" }).status === 0;
+}
+
+/** Both the Browse button and the pick request need this: a chooser on the machine the browser is on. */
+export function pickerAvailable(localPeer: boolean, platform: NodeJS.Platform = process.platform): boolean {
+  return localPeer && hasPicker(platform);
+}
+
 /** Opens the dialog and waits for it; null when this platform has no chooser. */
 export function pickDirectory(platform: NodeJS.Platform = process.platform): Promise<PickedDirectory | null> {
   const command = pickerCommand(platform);
@@ -46,7 +59,8 @@ export function pickDirectory(platform: NodeJS.Platform = process.platform): Pro
     child.on("error", (cause) => { clearTimeout(timer); reject(cause); });
     child.on("close", (code) => {
       clearTimeout(timer);
-      const path = stdout.trim();
+      // Only the chooser's own line terminator: a directory name may end in a space.
+      const path = stdout.replace(/[\r\n]+$/, "");
       if (path) return resolve({ path });
       // Dismissed: zenity and osascript exit 1, the Windows dialog still exits 0 with no output.
       if (code === 0 || code === 1) return resolve({ cancelled: true });

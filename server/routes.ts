@@ -98,9 +98,10 @@ type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 // its socket; see handle() in server/app.ts.
 // upgrade: makes the request a WebSocket (server.upgrade), a host link or a browser link; a handler that upgraded
 // returns undefined.
+// localPeer: the connection came from this machine's loopback interface. Taken from the socket, never from Host.
 export type RouteHandler = (
   request: Request,
-  context: { params: Promise<never>; disableIdleTimeout: () => void; upgrade: (data: ServerSocketData) => boolean },
+  context: { params: Promise<never>; disableIdleTimeout: () => void; upgrade: (data: ServerSocketData) => boolean; localPeer: boolean },
 ) => Response | undefined | Promise<Response | undefined>;
 export type RouteModule = Partial<Record<Method, RouteHandler>>;
 
@@ -211,6 +212,7 @@ export async function dispatch(
   params: Record<string, string | string[]>,
   disableIdleTimeout: () => void = () => {},
   upgrade: (data: ServerSocketData) => boolean = () => false,
+  localPeer = false,
 ): Promise<Response | undefined> {
   const handler = mod[request.method as Method] ?? (request.method === "HEAD" ? mod.GET : undefined);
   if (!handler) {
@@ -220,7 +222,7 @@ export async function dispatch(
     return new Response(null, { status: 204, headers: { allow } });
   }
   try {
-    return await handler(request, { params: Promise.resolve(params) as Promise<never>, disableIdleTimeout, upgrade });
+    return await handler(request, { params: Promise.resolve(params) as Promise<never>, disableIdleTimeout, upgrade, localPeer });
   } catch (error) {
     console.error(error);
     return Response.json({ error: "Internal Server Error" }, { status: 500 });
