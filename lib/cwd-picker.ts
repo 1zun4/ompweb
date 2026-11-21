@@ -45,6 +45,27 @@ export function pickerAvailable(localPeer: boolean, platform: NodeJS.Platform = 
   return localPeer && hasPicker(platform);
 }
 
+/** What a finished dialog means: a chosen path, a dismissal, or a failure worth reporting. */
+export type DialogOutcome = PickedDirectory | { error: string };
+
+/** Reads a chooser's exit status: only a real dismissal counts as cancellation. */
+export function dialogOutcome(
+  platform: NodeJS.Platform | string,
+  code: number | null,
+  stdout: string,
+  stderr: string,
+): DialogOutcome {
+  // Only the chooser's own line terminator: a directory name may end in a space.
+  const path = stdout.replace(/[\r\n]+$/, "");
+  if (path) return { path };
+  // Dismissed: zenity exits 1, the Windows dialog exits 0 with no output, and osascript exits 1
+  // for a cancelled dialog — but every other AppleScript error exits 1 too, so it needs -128.
+  const dismissed =
+    code === 0 || (code === 1 && (platform === "linux" || (platform === "darwin" && stderr.includes("(-128)"))));
+  if (dismissed) return { cancelled: true };
+  return { error: stderr.replace(/[\r\n]+$/, "") || `The folder dialog exited with code ${code}` };
+}
+
 /** Opens the dialog and waits for it; null when this platform has no chooser. */
 export function pickDirectory(platform: NodeJS.Platform = process.platform): Promise<PickedDirectory | null> {
   const command = pickerCommand(platform);
@@ -59,12 +80,9 @@ export function pickDirectory(platform: NodeJS.Platform = process.platform): Pro
     child.on("error", (cause) => { clearTimeout(timer); reject(cause); });
     child.on("close", (code) => {
       clearTimeout(timer);
-      // Only the chooser's own line terminator: a directory name may end in a space.
-      const path = stdout.replace(/[\r\n]+$/, "");
-      if (path) return resolve({ path });
-      // Dismissed: zenity and osascript exit 1, the Windows dialog still exits 0 with no output.
-      if (code === 0 || code === 1) return resolve({ cancelled: true });
-      reject(new Error(stderr.trim() || `The folder dialog exited with code ${code}`));
+      const outcome = dialogOutcome(platform, code, stdout, stderr);
+      if ("error" in outcome) reject(new Error(outcome.error));
+      else resolve(outcome);
     });
   });
 }
