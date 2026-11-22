@@ -205,7 +205,13 @@ exactly one response variant: `{confirmed}`, `{value}`, `{cancelled: true}`, or
   all and only opens the session. The same request is then refused with 400
   `invalid_dialog_answer` by the answer route: nothing is answerable that the
   notification did not advertise in full. The complete push body stays under
-  the 4 KB Web Push limit.
+  the 4 KB Web Push limit; its `input` body is the dialog's own text verbatim
+  (a confirm's title and message, an ask's questions, or the dialog title), so a
+  push never shows a clipped prefix next to live buttons. A dialog whose
+  decision text the contract cannot represent is omitted too: a server-owned
+  confirm (`serverPayload` renders from/to/delivery/host/cwd), an option with a
+  `description`/`preview`, an ask question with a `header`, or a `secret`
+  `input`. A frame without an id never becomes the request id `"undefined"`.
 - An accepted answer goes through the same `extension_ui_response` command the
   desktop dialog sends, so it resolves a server-owned confirmation and applies
   the offline/restarting gate: a host that is offline answers 503

@@ -192,7 +192,7 @@ function uiResponseCommand(
           return {
             id: answer.id,
             question: question.question,
-            options: question.options.map((option) => option.label),
+            options: Array.isArray(question.options) ? question.options.map((option) => option.label) : [],
             multi: question.multi === true,
             selectedOptions: answer.selectedOptions,
             ...(answer.customInput !== undefined ? { customInput: answer.customInput } : {}),
