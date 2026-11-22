@@ -341,12 +341,13 @@ export class EventStreamConnection {
    * (deltas arrive constantly) and keeps one tool's window from delaying
    * another tool's snapshot.
    *
-   * `force` (a boundary frame is waiting) writes the queue and the held
-   * snapshots without regard to backpressure, because the frame that follows
-   * must not be delayed; a boundary flush merges the held snapshots into the
-   * queue first, in emission order, so the end frame never overtakes the output
-   * it ends. The heartbeat retries through the non-force path, so it never
-   * overrides backpressure.
+   * `force` (a boundary frame is waiting) writes the queued frames without
+   * regard to backpressure, because the frame that follows must not be delayed;
+   * a boundary flush merges the held snapshots into the queue first, in
+   * emission order, so the end frame never overtakes the output it ends. The
+   * heartbeat retries through the non-force path, so it never overrides
+   * backpressure; a snapshot released by its own window is written only while
+   * the sink has capacity.
    *
    * A tool snapshot is stamped with the time it is actually written, not the
    * time it was emitted: the deliberate hold must not read as network latency.
@@ -379,6 +380,10 @@ export class EventStreamConnection {
       .filter(([toolCallId]) => Date.now() >= (subscription.lastToolUpdateAt.get(toolCallId) ?? 0) + TOOL_UPDATE_FRAME_MIN_INTERVAL_MS)
       .sort(([, a], [, b]) => a.seq - b.seq);
     for (const [toolCallId, held] of releasable) {
+      // A sink whose write re-enters `drain()` may already have released and
+      // written this entry from the live map: stop at the current value, never
+      // write a stale iteration snapshot a second time.
+      if (subscription.heldToolUpdates.get(toolCallId) !== held) continue;
       subscription.heldToolUpdates.delete(toolCallId);
       const stamp = Date.now();
       subscription.lastToolUpdateAt.set(toolCallId, stamp);
