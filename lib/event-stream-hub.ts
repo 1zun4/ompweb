@@ -341,10 +341,12 @@ export class EventStreamConnection {
    * (deltas arrive constantly) and keeps one tool's window from delaying
    * another tool's snapshot.
    *
-   * `force` (a boundary frame is waiting, or the heartbeat) writes both without
-   * regard to backpressure, because the frame that follows must not be delayed;
-   * a boundary flush merges the held snapshots into the queue first, in
-   * emission order, so the end frame never overtakes the output it ends.
+   * `force` (a boundary frame is waiting) writes the queue and the held
+   * snapshots without regard to backpressure, because the frame that follows
+   * must not be delayed; a boundary flush merges the held snapshots into the
+   * queue first, in emission order, so the end frame never overtakes the output
+   * it ends. The heartbeat retries through the non-force path, so it never
+   * overrides backpressure.
    *
    * A tool snapshot is stamped with the time it is actually written, not the
    * time it was emitted: the deliberate hold must not read as network latency.
@@ -354,22 +356,25 @@ export class EventStreamConnection {
     for (const [toolCallId, at] of subscription.lastToolUpdateAt) {
       if (Date.now() - at >= TOOL_UPDATE_FRAME_MIN_INTERVAL_MS) subscription.lastToolUpdateAt.delete(toolCallId);
     }
+    // Detach the queue before writing: `writeFrame` can release the peer
+    // synchronously (a stream pull calls `resume()`, which drains every
+    // subscription), and that re-entrant drain must see an empty queue rather
+    // than write the frames this loop still holds a second time.
     const queue = subscription.pendingUpdates;
+    subscription.pendingUpdates = [];
     let written = 0;
     while (written < queue.length) {
       if (!force && this.sink.backpressured()) break;
       const frame = queue[written];
       written += 1;
-      if (!this.writeFrame(subscription, frame.data, frame.tool ? Date.now() : frame.at)) {
-        queue.splice(0, written);
-        return !this.closed;
-      }
+      if (!this.writeFrame(subscription, frame.data, frame.tool ? Date.now() : frame.at)) return !this.closed;
     }
-    queue.splice(0, written);
+    // Frames appended while writing stay behind the ones still to write.
+    if (written < queue.length) subscription.pendingUpdates = queue.slice(written).concat(subscription.pendingUpdates);
     if (this.sink.backpressured()) return !this.closed;
-    // Release what the windows allow, in emission order: two tools whose windows
-    // are both open must not be written in map order, or a snapshot carrying a
-    // later sequence would precede one carrying an earlier sequence.
+    // Release what the windows allow. Ordering is required per tool, not across
+    // tools: two independent tools may be written in either order, so the emit
+    // order here is deterministic, not a consumer dependency.
     const releasable = [...subscription.heldToolUpdates.entries()]
       .filter(([toolCallId]) => Date.now() >= (subscription.lastToolUpdateAt.get(toolCallId) ?? 0) + TOOL_UPDATE_FRAME_MIN_INTERVAL_MS)
       .sort(([, a], [, b]) => a.seq - b.seq);
