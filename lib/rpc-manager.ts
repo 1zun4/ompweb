@@ -3885,13 +3885,39 @@ export async function startRpcSession(
   // omp >= 18.5 lets only one process own a session file; a second `--resume`
   // child would fork into a new nested session on its first write. Reuse the
   // live wrapper that already reports this file (e.g. after it moved files).
-  if (sessionFile && !existing) {
+  // A dead keyed wrapper must not skip this scan: it owns nothing anymore,
+  // and a live wrapper under another key may already own this file.
+  if (sessionFile && (!existing || !existing.isAlive())) {
     for (const candidate of new Set(registry.values())) {
-      if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
-        registry.set(sessionId, candidate);
-        notifyRunningChange({ refreshSessionList: true });
-        return { session: candidate, realSessionId: candidate.sessionId };
+      if (!candidate.isAlive() || !candidate.sessionFile || !samePath(candidate.sessionFile, sessionFile)) continue;
+      // The scan must not silently reuse a live owner whose spawn-time
+      // --advisor flag the caller just toggled: apply the same gate as the
+      // keyed path above (unknown legacy flag, no opinion, busy child, or an
+      // unreplaceable host-owned child all reuse; an idle mismatch replaces).
+      const candidateEffectiveAdvisor = advisor === true || candidate.launchAdvisor === true;
+      const reuseCandidate = advisor === undefined
+        || (candidate.adopted && !candidate.hostOwnedLifecycle)
+        || candidate.advisorSpawned === candidateEffectiveAdvisor
+        || candidate.isRunning()
+        || candidate.isEditingHistory()
+        || (candidate.hostOwnedLifecycle && !candidate.canReplaceAdvisor());
+      if (!reuseCandidate) {
+        if (candidate.hostOwnedLifecycle) {
+          replacement = await candidate.replaceAdvisorIfIdle(launch, preparingCommand) ?? undefined;
+          if (replacement) break;
+          // The daemon could not replace it: keep the live owner, as the
+          // keyed path does when its replacement comes back null.
+        } else {
+          // Replace the mismatched owner instead of spawning beside it: a
+          // second --resume child would fork into a nested session.
+          await candidate.destroyAndWait("advisor", true);
+          if (candidate.destroyPromise) await untilHostDown(candidate.host, candidate.destroyPromise);
+          continue;
+        }
       }
+      registry.set(sessionId, candidate);
+      notifyRunningChange({ refreshSessionList: true });
+      return { session: candidate, realSessionId: candidate.sessionId };
     }
   }
 
