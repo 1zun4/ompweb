@@ -87,9 +87,14 @@ function canonicalProjectPath(value: string): string {
  *  them (bare or `--flag=value`), or a stored config could hijack the session
  *  boundary (`--cwd`/`--resume`/`--profile`) or the rpc-ui mode. `--profile`
  *  is reserved too: it would bypass the validated `profile` field and could
- *  hand omp a name it rejects, failing every session in the workspace. */
-const RESERVED_LAUNCH_ARGS: Record<string, true> = { "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true, "--profile": true };
-const RESERVED_LAUNCH_ARG_PREFIXES = ["--mode=", "--cwd=", "--resume=", "--profile="];
+ *  hand omp a name it rejects, failing every session in the workspace.
+ *  `--extension`/`--hook` (and `-e`) are reserved too: omp loads those files
+ *  (multiple allowed, headless in rpc-ui mode), and the daemon appends its own
+ *  session-edit extension after these args — a config-carried one would load
+ *  arbitrary extension code into every spawn for that workspace. `--plugin-dir`
+ *  is reserved for the same reason: it adds a directory to extension discovery. */
+const RESERVED_LAUNCH_ARGS: Record<string, true> = { "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true, "--profile": true, "--extension": true, "--hook": true, "-e": true, "--plugin-dir": true };
+const RESERVED_LAUNCH_ARG_PREFIXES = ["--mode=", "--cwd=", "--resume=", "--profile=", "--extension=", "--hook=", "-e=", "--plugin-dir="];
 export function isReservedLaunchArg(arg: string): boolean {
   return RESERVED_LAUNCH_ARGS[arg] === true || RESERVED_LAUNCH_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix));
 }

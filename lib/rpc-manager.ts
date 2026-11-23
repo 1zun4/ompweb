@@ -608,6 +608,15 @@ export class AgentSessionWrapper {
    *  concurrent callers can never both enter (the waiter/promptRunning
    *  bookkeeping alone is not an atomic gate). */
   private mcpListInFlight = false;
+  /** A /mcp command whose output wait timed out, but whose child may still
+   * deliver that command's output later. While set, command_output frames are
+   * swallowed instead of leaking into the chat stream, and a retry of the MCP
+   * command is refused (see runMcpCommand): the suppression belongs to the
+   * timed-out command, so a retry must not clear it and receive the earlier
+   * command's late output as its own. It clears when the orphaned output
+   * arrives (handleFrame) or at the next prompt boundary (emit), which in
+   * stream order follows any output the child still owes for that command. */
+  private mcpListOutputDiscarded = false;
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
@@ -1364,6 +1373,16 @@ export class AgentSessionWrapper {
           notifyRunningChange();
           return;
         }
+        // The output of a timed-out /mcp command, arriving late. Swallow it
+        // (and consume the suppression: one command_output frame is the whole
+        // output, matching the waiter contract) instead of leaking a Settings
+        // command's output into the chat stream. A retry cannot be running
+        // while this flag is set, so this frame is the orphan's, not the
+        // retry's — a fresh runMcpCommand never clears the flag.
+        if (this.mcpListOutputDiscarded) {
+          this.mcpListOutputDiscarded = false;
+          return;
+        }
         // The output of a background `/rename` (see autoTitle) is not chat content.
         if (Date.now() < this.quietRenameUntil && typeof event.text === "string" && RENAME_OUTPUT_RE.test(event.text)) {
           this.quietRenameUntil = 0;
@@ -1861,6 +1880,21 @@ export class AgentSessionWrapper {
   }
 
   private emit(nativeEvent: UnsequencedAgentEvent): void {
+    // A discarded /mcp list output is swallowed in handleFrame, but the flag
+    // itself also clears here, at the next prompt boundary: in stream order
+    // the child emits any output it still owes for the timed-out command
+    // before starting another prompt, so past this boundary the flag can only
+    // be stale — and leaving it set would swallow a later genuine
+    // command_output. This is what unblocks a retry when the orphan never
+    // arrives at all.
+    if (
+      nativeEvent.type === "agent_start" ||
+      nativeEvent.type === "agent_end" ||
+      nativeEvent.type === "prompt_result" ||
+      nativeEvent.type === "prompt_error"
+    ) {
+      this.mcpListOutputDiscarded = false;
+    }
     // Tool-result images go out (and into the replay snapshot) as media URLs:
     // big screenshots must never sit in the browser's chat state as base64.
     const event = eventWithToolResultImageUrls(nativeEvent);
@@ -2232,7 +2266,7 @@ export class AgentSessionWrapper {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
     if (this.isRunning() || this.historyEditInFlight || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0) throw new WebRpcError("Wait for the current operation to finish", "session_busy");
-    if (this.mcpListWaiter || this.mcpListInFlight) throw new WebRpcError("MCP list is already loading", "mcp_list_loading");
+    if (this.mcpListWaiter || this.mcpListInFlight || this.mcpListOutputDiscarded) throw new WebRpcError("MCP list is already loading", "mcp_list_loading");
 
     // Dedicated synchronous mutex: promptRunning alone is not atomic — two
     // concurrent callers could both pass the isRunning() check, and the second
@@ -2261,6 +2295,12 @@ export class AgentSessionWrapper {
     waiter.timer = setTimeout(() => {
         if (this.mcpListWaiter !== waiter) return;
         this.mcpListWaiter = null;
+        // The child may still deliver this command's output later; mark it
+        // orphaned so handleFrame swallows it instead of leaking it into the
+        // chat stream (or into a retry's waiter). A fresh runMcpCommand does
+        // NOT clear this flag — the retry stays blocked until the output
+        // drains or the next prompt boundary clears it.
+        this.mcpListOutputDiscarded = true;
         rejectOutput(new WebRpcError("Timed out while loading MCP servers", "mcp_list_timeout"));
       }, MCP_LIST_TIMEOUT_MS);
     // Don't pin the event loop if the caller never awaits (route aborted): the
