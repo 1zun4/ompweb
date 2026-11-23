@@ -411,6 +411,16 @@ function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void
   )) throw new HostOpError(426, "host_upgrade_required", "Update this host before using its application protocol");
   const line = encodeQueued(body);
   const size = Buffer.byteLength(line);
+  // The downlink backlog is bounded (spec D6): a command that would take the
+  // queued plus unacknowledged bytes past downlinkBacklogBytes is rejected
+  // before anything is recorded, so its caller hears it at once instead of
+  // at the op timeout, and it is never delivered later. Control messages
+  // (kill, interest, host_tools) are small and keep liveness and cleanup
+  // working on a saturated link; they bypass the cap.
+  if ((body.type === "req" || body.type === "stdin")
+    && link.outboxBytes + link.sender.queuedBytes + size > LINK_LIMITS.downlinkBacklogBytes) {
+    throw new LinkLimitError(`downlink backlog exceeds ${LINK_LIMITS.downlinkBacklogBytes} bytes`);
+  }
   // Ahead of it: what is queued or unacked on this link (counters, no scan); fairness may send it before some of that.
   const sample = { at: Date.now(), t: performance.now(), bytes: size, bytesAhead: link.outboxBytes + link.sender.queuedBytes, session: sessionOf(link, body) };
   link.sender.push(key, { line, size, sample });
@@ -2120,6 +2130,14 @@ export function lastUplinkAt(hostId: string): number | null {
 /** Link telemetry is internal scheduling state; reading it never creates a link or broadcasts a change. */
 export function getHostCapacity(hostId: string): CapacitySnapshot | null {
   return hub().links.get(hostId)?.capacity ?? null;
+}
+
+/** Queued plus unacknowledged downlink bytes on `hostId`'s link, or null
+ * when it has no link. Tests use it to place a backlog exactly on the cap. */
+export function getHostDownlinkBacklog(hostId: string): { queuedBytes: number; outboxBytes: number } | null {
+  const link = hub().links.get(hostId);
+  if (!link) return null;
+  return { queuedBytes: link.sender.queuedBytes, outboxBytes: link.outboxBytes };
 }
 
 export function getHostLinkProtocol(hostId: string): number | null {
