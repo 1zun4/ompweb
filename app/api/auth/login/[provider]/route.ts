@@ -7,7 +7,7 @@ import { invalidateUsageCache } from "@/lib/provider-usage";
 
 /**
  * Interactive login over a dedicated headless runner. The runner drives the
- * flow with login frames (runner/src/commands/agents.ts): `login_open_url`
+ * flow with login frames (packages/ompweb-runner/src/commands/agents.ts of the oh-my-pi fork): `login_open_url`
  * carries the OAuth URL, `login_input` asks for the pasted code/redirect URL,
  * `login_progress` reports progress. The SSE stream keeps pi-web's event names
  * (auth, prompt_request, progress, success, error, cancelled) so the client

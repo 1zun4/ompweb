@@ -448,7 +448,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, bashRunning, pendingBash, deferredBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
     externalRunActive,
-    toolPreset,
+    toolPreset, sessionToolPreset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId, editingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
@@ -1043,6 +1043,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
       thinkingLevel={thinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       toolPreset={toolPreset}
+      sessionToolPreset={sessionToolPreset}
+      isNewSession={isNew}
       onToolPresetChange={handleToolPresetChange}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}

@@ -51,7 +51,7 @@ import type { SessionOps } from "./session-ops";
 import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
 import { loadPools, type HostPool } from "./pools";
 import { validateHostTools } from "./shared-requests";
-import type { ApprovedReleasePin, HostSoftwareUpdate, HostUpdateCompatibility, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
+import type { ApprovedReleasePin, HostOmpUpdate, HostSoftwareUpdate, HostUpdateBlocker, HostUpdateCompatibility, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { isUpdateDisabled } from "../update-policy";
 import { WORKSPACE_OP_PARAMS, type WorkspaceFileEvent, type WorkspaceOps } from "../workspace-types";
 import { validWorkspaceResult } from "./workspace-results";
@@ -411,6 +411,16 @@ function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void
   )) throw new HostOpError(426, "host_upgrade_required", "Update this host before using its application protocol");
   const line = encodeQueued(body);
   const size = Buffer.byteLength(line);
+  // The downlink backlog is bounded (spec D6): a command that would take the
+  // queued plus unacknowledged bytes past downlinkBacklogBytes is rejected
+  // before anything is recorded, so its caller hears it at once instead of
+  // at the op timeout, and it is never delivered later. Control messages
+  // (kill, interest, host_tools) are small and keep liveness and cleanup
+  // working on a saturated link; they bypass the cap.
+  if ((body.type === "req" || body.type === "stdin")
+    && link.outboxBytes + link.sender.queuedBytes + size > LINK_LIMITS.downlinkBacklogBytes) {
+    throw new LinkLimitError(`downlink backlog exceeds ${LINK_LIMITS.downlinkBacklogBytes} bytes`);
+  }
   // Ahead of it: what is queued or unacked on this link (counters, no scan); fairness may send it before some of that.
   const sample = { at: Date.now(), t: performance.now(), bytes: size, bytesAhead: link.outboxBytes + link.sender.queuedBytes, session: sessionOf(link, body) };
   link.sender.push(key, { line, size, sample });
@@ -1003,6 +1013,9 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
       return link.channels.get(message.ch)?.deliverLine(message.line);
     case "stderr":
       return link.channels.get(message.ch)?.deliverStderr(message.chunk);
+    case "omp_version":
+      link.ompVersion = message.ompVersion;
+      return setStatus(link, link.status === "omp-missing" ? "online" : link.status);
     case "resync":
       return link.channels.get(message.ch)?.deliverResync();
     case "exit": {
@@ -1112,8 +1125,19 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
         && typeof value.baseCommit === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value.baseCommit);
     case "exportSession":
       return isRecord(value) && typeof value.html === "string" && typeof value.fileName === "string";
-    case "readSession":
-      return isRecord(value) && isRecord(value.info) && isRecord(value.context);
+    case "readSession": {
+      const options = isRecord(args[1]) ? args[1] : {};
+      if (!isRecord(value) || !isRecord(value.info)) return false;
+      // A daemon that predates `?meta=1` ignores the option and answers the
+      // full transcript; the route derives the navigation shape from it.
+      if (isRecord(value.context)) return true;
+      if (options.meta !== true || value.context !== null) return false;
+      // Nothing to derive the navigation fields from: a null-context result
+      // must carry the tree, leaf and branch metadata itself (model may be null).
+      return Array.isArray(value.tree) && nullableString(value.leafId)
+        && (value.info.model === null || isRecord(value.info.model))
+        && typeof value.info.thinkingLevel === "string";
+    }
     case "readContext": {
       // The context route reads a different shape per mode.
       const options = isRecord(args[2]) ? args[2] : {};
@@ -1666,6 +1690,22 @@ function softwareUpdate(value: unknown): value is HostSoftwareUpdate & Record<st
     && nullableString(value.blockedReason) && typeof value.updateCommand === "string";
 }
 
+/** What a daemon that declares the runner channel reports for omp; anything else it sends is dropped. */
+function ompRunnerUpdate(value: Record<string, unknown>): HostOmpUpdate {
+  const blockers = value.blockers as Record<string, unknown>[] | undefined;
+  const operation = value.operation;
+  if (!nullableString(value.currentVersion) || !nullableString(value.availableVersion) || typeof value.updateAvailable !== "boolean" || typeof value.canUpdate !== "boolean" || !nullableString(value.blockedReason)
+    || !(blockers === undefined || Array.isArray(blockers) && blockers.every((blocker) => isRecord(blocker) && typeof blocker.code === "string" && typeof blocker.message === "string" && typeof blocker.forceable === "boolean"))
+    || !(operation === undefined || operation === null || updateOperation(operation))) {
+    throw new HostOpError(502, "host_bad_result", "The host returned an invalid update status");
+  }
+  return {
+    currentVersion: value.currentVersion, availableVersion: value.availableVersion, updateAvailable: value.updateAvailable, canUpdate: value.canUpdate, blockedReason: value.blockedReason, runnerChannel: true,
+    ...(blockers ? { blockers: blockers.map(({ code, message, forceable }) => ({ code, message, forceable }) as HostUpdateBlocker) } : {}),
+    ...(operation === undefined ? {} : { operation }),
+  };
+}
+
 function updateOperation(value: unknown): value is HostUpdateOperation {
   return isRecord(value) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 128
     && (value.target === "ompweb" || value.target === "omp") && typeof value.version === "string"
@@ -1726,8 +1766,9 @@ export async function getHostSoftwareUpdates(id: string, force = false, compatib
     || !(result.operation === null || updateOperation(result.operation))) {
     throw new HostOpError(502, "host_bad_result", "The host returned an invalid update status");
   }
-  // A daemon from before omp updated with ompweb reports a full update status for omp: keep only its version.
-  const info = { ...result, omp: { currentVersion: result.omp.currentVersion } } as unknown as HostUpdateInfo;
+  // A daemon that predates the runner channel reports only the omp version (and one older still reports a full update status for omp, which it ran as `omp update`): keep just the version unless the daemon declares the runner channel.
+  const omp = result.omp.runnerChannel === true ? ompRunnerUpdate(result.omp) : { currentVersion: result.omp.currentVersion };
+  const info = { ...result, omp } as unknown as HostUpdateInfo;
   const protocol = info.ompweb.protocolVersion;
   if ((!releasePin || info.ompweb.supportsReleasePin === true) && info.ompweb.updateAvailable && (protocol === null || protocol < compatibility.min || protocol > compatibility.max)) {
     return { ...info, ompweb: { ...info.ompweb, canUpdate: false, canForceUpdate: false, blockedReason: protocol === null
@@ -1806,10 +1847,13 @@ export async function updateHostSoftware(id: string, target: HostUpdateTarget, v
   }
   const candidate = checked[target];
   const link = linkFor(id);
-  const recovery = candidate.forceMethod === "recovery" || options.phase !== undefined && candidate.supportsTwoPhaseUpdate !== true;
+  // This machine's old daemon is updated only by recovery, which Force confirms. A linked host's old daemon still updates
+  // itself for a normal update: the recovery helper its Force uses is offered beside that, not instead of it.
+  const recovery = candidate.forceMethod === "recovery" && (options.force === true || id === LOCAL_HOST_ID) || options.phase !== undefined && candidate.supportsTwoPhaseUpdate !== true;
   const pinnedRecovery = options.releasePin !== undefined && recovery;
   if (!matching && (!candidate.updateAvailable || !(options.force ? candidate.canForceUpdate || candidate.canUpdate : candidate.canUpdate) || candidate.availableVersion !== version && !pinnedRecovery)) {
-    throw new HostOpError(409, "host_update_blocked", candidate.blockedReason ?? "The available version changed; check for updates again");
+    // An omp update names its blocker (ompweb_update_active, omp_install_active...) for a caller that must not read English.
+    throw new HostOpError(409, target === "omp" ? candidate.blockers?.[0]?.code ?? "host_update_blocked" : "host_update_blocked", candidate.blockedReason ?? "The available version changed; check for updates again");
   }
   if (recovery && !options.force) throw new HostOpError(409, "host_update_blocked", "This host requires explicitly approved recovery");
   if (options.force && recovery && id === LOCAL_HOST_ID) {
@@ -2086,6 +2130,14 @@ export function lastUplinkAt(hostId: string): number | null {
 /** Link telemetry is internal scheduling state; reading it never creates a link or broadcasts a change. */
 export function getHostCapacity(hostId: string): CapacitySnapshot | null {
   return hub().links.get(hostId)?.capacity ?? null;
+}
+
+/** Queued plus unacknowledged downlink bytes on `hostId`'s link, or null
+ * when it has no link. Tests use it to place a backlog exactly on the cap. */
+export function getHostDownlinkBacklog(hostId: string): { queuedBytes: number; outboxBytes: number } | null {
+  const link = hub().links.get(hostId);
+  if (!link) return null;
+  return { queuedBytes: link.sender.queuedBytes, outboxBytes: link.outboxBytes };
 }
 
 export function getHostLinkProtocol(hostId: string): number | null {

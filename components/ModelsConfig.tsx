@@ -246,6 +246,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
             onBlurValidate={apiKeyV.onBlur}
             showLabel={t("modelsConfig.showApiKey")}
             hideLabel={t("modelsConfig.hideApiKey")}
+            selectAllOnFocus
           />
         </FormField>
 
