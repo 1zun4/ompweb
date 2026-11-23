@@ -2,11 +2,13 @@ import "../../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, before } from "node:test";
 import React from "react";
+import userEvent from "@testing-library/user-event";
 const { act, cleanup, render, renderHook } = await import("@testing-library/react/pure.js");
 
 // Same specifiers as useNotifications' own imports: on Windows a relative path
 // can load a second toast module, whose manager the rendered provider never sees.
 const { ClampedDescription, ToastProvider, toast } = await import("@/components/ui/toast");
+const { setLocale } = await import("@/lib/i18n");
 const { useNotifications } = await import("@/hooks/useNotifications");
 const { notificationHistory } = await import("@/lib/notification-history");
 
@@ -230,5 +232,59 @@ test("a push the service worker showed reloads the list from the server; other m
     globalThis.fetch = previousFetch;
     delete window.navigator.serviceWorker;
     act(() => notificationHistory.clear());
+  }
+});
+
+test("clamped description is keyboard-operable: Tab focuses it, Space/Enter expand it", async () => {
+  render(React.createElement(ClampedDescription, null, "line1\nline2\nline3\nline4"));
+  const description = document.querySelector("[aria-expanded]");
+  assert.ok(description, "clamped description renders");
+  // Stays a span, not a button: base-ui's ToastRoot skips swipe gestures
+  // starting on buttons (and [role="button"]), so a button here would break
+  // swipe-to-dismiss starting on the description.
+  assert.equal(description.tagName, "SPAN");
+  assert.equal(description.tabIndex, 0);
+  assert.equal(description.getAttribute("aria-expanded"), "false");
+  const user = userEvent.setup();
+  await user.tab();
+  assert.equal(document.activeElement, description);
+  await user.keyboard(" ");
+  assert.equal(description.getAttribute("aria-expanded"), "true");
+  await user.keyboard(" ");
+  assert.equal(description.getAttribute("aria-expanded"), "false");
+  await user.keyboard("{Enter}");
+  assert.equal(description.getAttribute("aria-expanded"), "true");
+});
+
+test("a swipe starting on the clamped description still dismisses the toast", () => {
+  const { card } = show("line1\nline2\nline3\nline4", { clamp: true });
+  const description = card().querySelector("[aria-expanded]");
+  assert.ok(description, "clamped description renders inside the toast");
+  // A touch swipe: base-ui ignores swipes starting on interactive elements,
+  // so if the description ever becomes a button again this swipe never
+  // starts and the toast stays.
+  const touch = (target, type, x, y) => {
+    const event = new window.MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, detail: 1 });
+    Object.defineProperties(event, { pointerId: { value: 1 }, pointerType: { value: "touch" } });
+    act(() => { target.dispatchEvent(event); });
+  };
+  touch(description, "pointerdown", 100, 50);
+  touch(description, "pointermove", 110, 50);
+  touch(description, "pointermove", 200, 52);
+  touch(description, "pointerup", 200, 52);
+  assert.equal(card()?.hasAttribute("data-ending-style") ?? true, true);
+});
+
+test("toast close button uses the localized dismiss label, not hardcoded English", () => {
+  // In English the localized value happens to equal the old hardcoded
+  // "Dismiss", so this test switches to Japanese: pre-fix it sees the
+  // hardcoded English label, post-fix the Japanese one.
+  act(() => { setLocale("ja"); });
+  try {
+    render(React.createElement(ToastProvider, null));
+    act(() => { toast.info("Saved"); });
+    assert.equal(document.querySelector(".toast-close-button").getAttribute("aria-label"), "閉じる");
+  } finally {
+    act(() => { setLocale("en"); });
   }
 });
