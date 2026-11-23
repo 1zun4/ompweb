@@ -601,6 +601,8 @@
   "chatWindow.retry": "Try again",
   "chatWindow.loadingSession": "Loading session...",
   "chatWindow.messageCount.one": "{count} message",
+  "chatWindow.completedSteps.one": "Completed {count} step",
+  "chatWindow.completedSteps.other": "Completed {count} steps",
   "chatWindow.messageCount.other": "{count} messages",
   "chatWindow.processDetails": "Process details",
   "chatWindow.runningCommand": "Running command...",

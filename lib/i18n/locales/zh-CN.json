@@ -585,6 +585,8 @@
   "chatWindow.retry": "重试",
   "chatWindow.loadingSession": "正在加载会话...",
   "chatWindow.messageCount.one": "{count} 条消息",
+  "chatWindow.completedSteps.one": "已完成 {count} 步",
+  "chatWindow.completedSteps.other": "已完成 {count} 步",
   "chatWindow.messageCount.other": "{count} 条消息",
   "chatWindow.processDetails": "过程详情",
   "chatWindow.runningCommand": "正在运行命令...",
