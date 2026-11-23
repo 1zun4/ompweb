@@ -35,3 +35,30 @@ test("folded activity keeps tool calls from separate messages as separate entrie
   assert.deepEqual(calls[1].options.sourceBlockIndices, [0, 1, 2]);
   assert.equal(new Set(calls.map(({ idx, options }) => `${options.keyPrefix}-${idx}`)).size, calls.length);
 });
+
+test("a finished turn folds its activity into one Completed N steps row", async () => {
+  const React = (await import("react")).default;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { renderTranscriptGroupRow } = await import("./ChatWindow-transcript-group-row.tsx");
+  const { planTranscriptRows } = await import("../lib/chat-transcript-plan.ts");
+  const messages = [
+    { role: "user", content: "go" },
+    assistant([call("a")]),
+    assistant([{ type: "text", text: "done" }]),
+  ];
+  const rows = planTranscriptRows(messages, {});
+  const group = rows.find((row) => row.kind === "group");
+  assert.ok(group, "a turn with tool activity must plan as a group row");
+  const rendered = renderTranscriptGroupRow(group, {
+    messages,
+    renderMessage: (idx) => React.createElement("div", { key: `msg-${idx}` }, `msg-${idx}`),
+    flat: false,
+    messageRefs: { current: [] },
+    visibleRefIndexByMessage: new Map(),
+  });
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null, ...rendered));
+  // The final reply stays visible; the activity folds to one summary row.
+  assert.match(html, /msg-2/, "the final reply must stay expanded");
+  assert.match(html, /Completed \d+ steps?|chatWindow\.completedSteps/, `the folded row must read as completed steps, got: ${html.slice(0, 300)}`);
+  assert.match(html, /tool calls?|chatWindow\.toolCallCount/, "the folded row must count tool calls");
+});

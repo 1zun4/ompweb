@@ -6816,7 +6816,7 @@ test("equal-path file tabs retain their originating session when the selected ow
     await sleep(60);
   });
   await until(() => view.queryByText("FIRST OWNER CONTENT"), "the first owner file opens");
-  await act(async () => { fireEvent.click(view.getByText("Worker two conversation")); await sleep(60); });
+  await act(async () => { fireEvent.click(within(view.container.querySelector("#workspace-sidebar")).getByText("Worker two conversation")); await sleep(60); });
   await act(async () => {
     stream.emit({ type: "host_tool_call", id: "second-open", sessionId: "worker-two", hostId: "h2", cwd: "/shared", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
     await sleep(60);
@@ -6847,7 +6847,7 @@ test("a retained foreign-source tab cannot mention its path into the selected wo
     await sleep(60);
   });
   await until(() => view.queryByText("FIRST OWNER CONTENT"), "the first owner's file opens");
-  await act(async () => { fireEvent.click(view.getByText("Worker two conversation")); await sleep(60); });
+  await act(async () => { fireEvent.click(within(view.container.querySelector("#workspace-sidebar")).getByText("Worker two conversation")); await sleep(60); });
   await act(async () => {
     fireEvent.change(view.getByRole("textbox"), { target: { value: "Worker two draft" } });
     stream.emit({ type: "host_tool_call", id: "mention-second-open", sessionId: "worker-two", hostId: "h2", cwd: "/shared", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
@@ -6862,7 +6862,7 @@ test("a retained foreign-source tab cannot mention its path into the selected wo
   if (foreignMention) await act(async () => { fireEvent.click(foreignMention); });
   assert.equal(view.getByRole("textbox").value, "Worker two draft", "a source-relative path must not be inserted into another worker's composer");
   assert.equal(foreignMention === null || foreignMention.disabled, true, "the foreign-source action is unavailable");
-  await act(async () => { fireEvent.click(view.getByText("Worker one conversation")); await sleep(60); });
+  await act(async () => { fireEvent.click(within(view.container.querySelector("#workspace-sidebar")).getByText("Worker one conversation")); await sleep(60); });
   const sourceMention = view.getByRole("button", { name: translate("appShell.mentionFileInChat") });
   assert.equal(sourceMention.disabled, false, "returning to the source session restores the action");
   await act(async () => {

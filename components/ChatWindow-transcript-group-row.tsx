@@ -35,7 +35,9 @@ function withAssistantBlocks(
 function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: () => ReactNode }) {
   const { t, tn } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
+  // A finished turn folds to one summary row ("Completed N steps · M tool
+  // calls"); the final reply stays expanded above it. Live turns stay flat.
+  const parts = [tn("chatWindow.completedSteps", messageCount)];
   if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
 
   return (
