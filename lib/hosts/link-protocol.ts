@@ -47,6 +47,13 @@ export const LINK_LIMITS = {
    * link's server side uses it as a cap: its window follows the link below it (lib/browser-link.ts `measure`). */
   unackedBytes: 2 * 256 * 1024,
   uplinkBytes: 16 * 1024 * 1024,
+  /** Per-link bound on queued plus unacknowledged downlink bytes (spec D6):
+   * a command that would take the backlog past this is rejected before it is
+   * recorded, so a slow daemon cannot grow the hub's retained backlog
+   * without bound. 4x maxLineBytes, so a max-size line is always admittable
+   * on an empty link; the same order as channelBufferBytes and the daemon's
+   * per-channel 32 MB resync cap. */
+  downlinkBacklogBytes: 32 * 1024 * 1024,
   blobBytes: 64 * 1024 * 1024,
   inlineResultBytes: 1024 * 1024,
   opTimeoutMs: 30_000,
