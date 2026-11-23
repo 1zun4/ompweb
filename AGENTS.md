@@ -1142,6 +1142,36 @@ end to end:
   dropped or reordered. Merged frames keep the latest frame's sequence and emit
   time and carry `web.first`, their first piece's sequence. Deltas of different
   blocks never merge past each other: that would break the sequence order.
+- Tool snapshots (`event-stream-hub.ts`, session channel): omp sends the whole
+  accumulated output on every `tool_execution_update`, so the newest snapshot per
+  `toolCallId` is held **outside** the ordered message queue and written at most
+  once per `TOOL_UPDATE_FRAME_MIN_INTERVAL_MS` of that tool. A tool frame needs
+  no position among the deltas: the browser fences it by `max(lifecycleSequence,
+  toolsSnapshotSequence, toolSequences.get(tool))` and never by
+  `messageSequence` (`hooks/useAgentSession-sync.ts`). Three consequences, all
+  required: a message delta neither waits for a held snapshot nor releases one
+  (otherwise a bash tool printing during a streaming turn got one snapshot per
+  delta, i.e. no cap at all); a tool that has never been written has no window,
+  so its first snapshot is never delayed behind another tool's hold; and the
+  ordering guarantee is per domain, not globally by `web.sequence`. Message
+  deltas stay ordered and lossless among themselves, each tool's own frames stay
+  monotonic, and a boundary frame follows the frames emitted before it. Across
+  domains an older sequence may arrive later: another tool's newly written
+  snapshot can carry a lower sequence than a held one, and message@3 can precede
+  tool@2. That is safe because the consumer keeps separate floors; it is not a
+  replay or reordering defect. Where several held snapshots become releasable
+  together they are written in their own emission order.
+  The "at most once per second" holds only between consecutive
+  `tool_execution_update` frames of the same tool. Every other session frame —
+  the same or another tool's `tool_execution_start`/`end`, `btw_delta`,
+  `message_end`, … — is a boundary that merges every held snapshot into the
+  queue ahead of itself in emission order; the forced drain then writes the whole
+  queue regardless of backpressure, so the boundary never overtakes the output it
+  ends. A burst of boundary frames therefore releases snapshots at the
+  pre-throttle rate, bounded by how many boundary frames arrive; no snapshot is
+  dropped or reordered. The throttle is not an unconditional one-per-second cap.
+  A written snapshot is stamped with its write time, not the emit time: the
+  deliberate hold must not appear as network latency in Connection diagnostics.
 - Browser (`lib/message-update-coalescer.ts`): applies each delta on arrival and
   dispatches the whole message at display rate, so `useAgentSession` only ever
   sees whole messages. A delta with no base is held and triggers a catch-up; the
