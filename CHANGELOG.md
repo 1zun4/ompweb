@@ -9,6 +9,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ### Fixed
 
 - **Horizontal scrollbars no longer clip file-panel tabs.** The tab row keeps its full height in narrow panels, including on mobile.
+- **Show the generation-speed pill in the top bar again.** Since the header opener was split from the file-panel close control, the pill's box sized to zero width and its narrow-header rule hid it on every screen; it now keeps its width. Phone-width screens still hide it.
 
 ## [v0.7.4] - 2026-11-20
 
