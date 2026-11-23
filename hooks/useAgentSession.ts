@@ -37,8 +37,8 @@ import { displayMessage } from "@/lib/message-delta";
 import { looksLikeRunningTurn } from "@/lib/chat-transcript-plan";
 import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
 import type { BashResultInfo, ClientMessageStatus } from "@/lib/pi-types";
-import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
-import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
+import { getPresetForToolNames, getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
+import { getPreferredToolPreset, getSessionToolPreset, setPreferredToolPreset, setSessionToolPreset } from "@/lib/tool-preset-preference";
 import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { validateOutgoingPrompt } from "@/lib/image-attachments";
@@ -451,6 +451,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // to avoid a server/client mismatch when the user stored a different preset.
   const [toolPreset, setToolPreset] = useState<ToolPreset>("full");
   useEffect(() => { setToolPreset(getPreferredToolPreset()); }, []);
+  // The preset the current session was spawned with (#356 item 2): null while
+  // the chat is new (nothing spawned yet) or the session's spawn was never
+  // recorded in this browser. A running session keeps its tools when the
+  // preference changes, so this never follows toolPreset.
+  const [sessionToolPreset, setSessionToolPresetState] = useState<ToolPreset | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
@@ -942,6 +947,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = session?.id;
     if (!sid) {
       setAdvisorEnabled(false);
+      setSessionToolPresetState(null);
       return;
     }
     let stored = false;
@@ -954,6 +960,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // The spawn registry must match before any command POST can lazily start
     // the omp process; localStorage alone would leave resumed sessions dark.
     setSessionAdvisorSpawn(sid, stored);
+    // The preset this session was spawned with, if this browser recorded it.
+    setSessionToolPresetState(getSessionToolPreset(sid));
   }, [session?.id]);
 
   const handleAdvisorChange = useCallback((enabled: boolean) => {
@@ -1398,6 +1406,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         } catch {
           // Best-effort: the spawned process already has --advisor.
         }
+      }
+      // Record the preset this spawn used, so the badge and banner can show
+      // the session's actual toolset (#356 item 2). A pooled creation reuses
+      // its original body's toolNames, which may differ from the current
+      // preference, so read the effective body.
+      const spawnedToolNames = pooled
+        ? (JSON.parse(creationBodyRef.current!.json) as { toolNames?: string[] }).toolNames
+        : request.toolNames;
+      const spawnedPreset = getPresetForToolNames(spawnedToolNames);
+      if (spawnedPreset !== null) {
+        setSessionToolPreset(realId, spawnedPreset);
+        setSessionToolPresetState(spawnedPreset);
       }
       // A prompt or side question that created this runtime attaches its own stream,
       // which would only replace an observer attached here.
@@ -3933,6 +3953,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // In-memory registry still applies for this page load.
           }
         }
+        // Same for the spawn toolset: the fork keeps the parent's tools.
+        if (sessionToolPreset) setSessionToolPreset(newSessionId, sessionToolPreset);
         onSessionForked?.(newSessionId);
       }
     } catch (e) {
@@ -3941,7 +3963,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       forkInFlightRef.current = false;
       setForkingEntryId(null);
     }
-  }, [advisorEnabled, onSessionForked]);
+  }, [advisorEnabled, sessionToolPreset, onSessionForked]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current || agentRunningRef.current || editInFlightRef.current) return;
@@ -4916,7 +4938,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, showPreCompactionHistory, streamState,
-    agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
+    agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, sessionToolPreset, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, forkingEntryId, editingEntryId,
     isCompacting, compactError, compactResult, tokensPerSecond, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,
