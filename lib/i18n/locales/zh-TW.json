@@ -597,6 +597,8 @@
   "chatWindow.retry": "再試一次",
   "chatWindow.loadingSession": "正在載入對話...",
   "chatWindow.messageCount.one": "{count} 則訊息",
+  "chatWindow.completedSteps.one": "已完成 {count} 步",
+  "chatWindow.completedSteps.other": "已完成 {count} 步",
   "chatWindow.messageCount.other": "{count} 則訊息",
   "chatWindow.processDetails": "行程詳細資訊",
   "chatWindow.runningCommand": "正在執行指令...",

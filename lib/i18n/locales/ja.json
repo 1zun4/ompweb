@@ -581,6 +581,8 @@
   "chatWindow.retry": "再試行",
   "chatWindow.loadingSession": "セッションを読み込み中...",
   "chatWindow.messageCount.one": "{count} 件のメッセージ",
+  "chatWindow.completedSteps.one": "{count} ステップ完了",
+  "chatWindow.completedSteps.other": "{count} ステップ完了",
   "chatWindow.messageCount.other": "{count} 件のメッセージ",
   "chatWindow.processDetails": "プロセス詳細",
   "chatWindow.runningCommand": "コマンドを実行中...",
