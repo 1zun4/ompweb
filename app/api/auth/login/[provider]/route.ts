@@ -15,7 +15,8 @@ import { invalidateUsageCache } from "@/lib/provider-usage";
  * `login_input_response` frame.
  */
 
-const LOGIN_EXTRA_ARGS = ["--no-session", "--no-extensions", "--no-skills", "--no-lsp"];
+// Extensions stay on: plugins register their own OAuth providers (antigravity-acp-provider).
+const LOGIN_EXTRA_ARGS = ["--no-session", "--no-skills", "--no-lsp"];
 const READY_TIMEOUT_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 15 * 60_000;
 const HEARTBEAT_MS = 30_000;
